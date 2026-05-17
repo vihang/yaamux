@@ -415,8 +415,15 @@ _is_brew_install() {
 }
 
 _show_version() {
-  local version="dev" source="unknown"
-  [[ -f "${YAAMUX_HOME}/VERSION" ]] && version="$(cat "${YAAMUX_HOME}/VERSION")"
+  local version="dev" source="unknown" candidate
+  # VERSION lives next to the script for git/dev installs, and under pkgshare
+  # for Homebrew installs (`prefix/share/yaamux/VERSION`).
+  for candidate in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+    if [[ -f "$candidate" ]]; then
+      version="$(cat "$candidate")"
+      break
+    fi
+  done
   if _is_brew_install; then
     source="brew"
   elif git -C "$YAAMUX_HOME" rev-parse --git-dir &>/dev/null; then

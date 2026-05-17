@@ -12,10 +12,12 @@ teardown() {
 
 # ── Read-only / metadata flags ─────────────────────────────────────────────────
 
-@test "--version prints 0.1.0 with a source tag" {
+@test "--version prints VERSION-file contents with a source tag" {
   run_yaamux --version
   [ "$status" -eq 0 ]
-  [[ "$output" == "yaamux 0.1.0"* ]]
+  expected="$(cat "$(dirname "$YAAMUX_BIN")/VERSION")"
+  [[ "$output" == "yaamux ${expected}"* ]]
+  [[ "$output" == *"(git@"* || "$output" == *"(brew)" || "$output" == *"(unknown)" ]]
 }
 
 @test "--help prints usage header" {

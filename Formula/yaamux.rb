@@ -12,7 +12,7 @@
 class Yaamux < Formula
   desc "Spawn N AI coding agents in parallel git worktrees in a tiled tmux grid"
   homepage "https://github.com/vihang/yaamux"
-  url "https://github.com/vihang/yaamux/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/vihang/yaamux/archive/refs/tags/v0.1.1.tar.gz"
   sha256 "REPLACE_WITH_TARBALL_SHA256"
   license "MIT"
 
@@ -28,8 +28,9 @@ class Yaamux < Formula
   end
 
   test do
-    assert_match "yaamux 0.1.0", shell_output("#{bin}/yaamux --version")
-    assert_match "yaamux 0.1.0", shell_output("#{bin}/ymx --version")
+    expected = (pkgshare/"VERSION").read.strip
+    assert_match "yaamux #{expected}", shell_output("#{bin}/yaamux --version")
+    assert_match "yaamux #{expected}", shell_output("#{bin}/ymx --version")
     assert_match "Agents Multiplexer", shell_output("#{bin}/yaamux --help")
   end
 end
