@@ -11,6 +11,9 @@ brew tap vihang/tap && brew install yaamux   # Homebrew (recommended)
 # or: git clone https://github.com/vihang/yaamux ~/.yaamux && ~/.yaamux/yaamux --install
 ```
 
+Both `yaamux` and `ymx` (3-char alias) are installed — same script, same flags.
+Examples in this README use `yaamux`; substitute `ymx` if you prefer fewer keystrokes.
+
 ---
 
 ## Why another amux?

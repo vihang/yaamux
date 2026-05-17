@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  yaamux — Agents Multiplexer
+#  yaamux — Agents Multiplexer  (alias: ymx)
 #
 #  Spawn N AI coding agents in parallel, one per git worktree, in a tiled tmux
 #  grid. Manage them locally or from any device. Install once, use in every repo.
 #
+#  Invoke as either `yaamux` or `ymx` — same script, same flags.
 #  Supported agents:  claude · gemini · copilot · codex
 #
 #  ── Install (once) ──────────────────────────────────────────────────────────
@@ -525,12 +526,15 @@ print(json.dumps(items, indent=2))
 
 _install_yaamux() {
   local dest="${HOME}/.local/bin/yaamux"
+  local short="${HOME}/.local/bin/ymx"
   mkdir -p "$(dirname "$dest")"
   ln -sf "$SELF" "$dest"
+  ln -sf "$SELF" "$short"
   chmod +x "$SELF"
   log "Symlinked: $dest → $SELF"
+  log "Symlinked: $short → $SELF  (3-char alias)"
   case ":$PATH:" in
-    *":${HOME}/.local/bin:"*) log "~/.local/bin already on PATH — 'yaamux' is ready." ;;
+    *":${HOME}/.local/bin:"*) log "~/.local/bin already on PATH — 'yaamux' / 'ymx' are ready." ;;
     *) warn "Add to your shell rc (~/.zshrc or ~/.bashrc):"
        echo '      export PATH="$HOME/.local/bin:$PATH"' ;;
   esac
@@ -551,8 +555,8 @@ _update_yaamux() {
 }
 
 _uninstall_yaamux() {
-  rm -f "${HOME}/.local/bin/yaamux"
-  log "Removed ~/.local/bin/yaamux symlink."
+  rm -f "${HOME}/.local/bin/yaamux" "${HOME}/.local/bin/ymx"
+  log "Removed ~/.local/bin/{yaamux,ymx} symlinks."
   log "The yaamux repo at $YAAMUX_HOME and per-project .claude/ files are untouched."
 }
 

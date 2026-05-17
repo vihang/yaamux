@@ -14,6 +14,9 @@ git clone https://github.com/vihang/yaamux ~/.yaamux
 ~/.yaamux/yaamux --install                          # symlinks yaamux → ~/.local/bin
 ```
 
+Both `yaamux` and `ymx` (3-char alias) are installed — same script, same flags.
+Use either; this guide uses `yaamux` for clarity.
+
 yaamux holds no project state — every run resolves the current repo with
 `git rev-parse` and derives everything from there. One binary serves all repos.
 

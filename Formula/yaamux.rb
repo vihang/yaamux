@@ -22,12 +22,14 @@ class Yaamux < Formula
 
   def install
     bin.install "yaamux"
+    bin.install_symlink bin/"yaamux" => "ymx"   # 3-char alias
     doc.install "YAAMUX.md", "README.md", "AGENTS.md"
     pkgshare.install "VERSION"
   end
 
   test do
     assert_match "yaamux 0.1.0", shell_output("#{bin}/yaamux --version")
+    assert_match "yaamux 0.1.0", shell_output("#{bin}/ymx --version")
     assert_match "Agents Multiplexer", shell_output("#{bin}/yaamux --help")
   end
 end
