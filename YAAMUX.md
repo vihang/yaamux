@@ -1,0 +1,283 @@
+# YAAMUX.md — Agents Multiplexer
+
+Full usage guide for `yaamux`. Spawn N AI coding agents in parallel, one per git
+worktree, in a tiled tmux grid — manageable locally and from any device.
+
+---
+
+## Install once, use everywhere
+
+```bash
+brew tap vihang/tap && brew install yaamux          # recommended
+# or, from a clone:
+git clone https://github.com/vihang/yaamux ~/.yaamux
+~/.yaamux/yaamux --install                          # symlinks yaamux → ~/.local/bin
+```
+
+yaamux holds no project state — every run resolves the current repo with
+`git rev-parse` and derives everything from there. One binary serves all repos.
+
+| yaamux command | Action |
+|--------------|--------|
+| `yaamux --version` | Print version + install source (`brew` / `git@SHA` / `unknown`) |
+| `yaamux --install` | Symlink `yaamux` into `~/.local/bin` (git installs only) |
+| `yaamux --update` | `brew upgrade yaamux` if brewed, else `git pull` the repo |
+| `yaamux --uninstall` | Remove the symlink (repo + project files untouched) |
+| `yaamux --init [--with-docs]` | Scaffold AGENTS.md + `.yaamux/config` + `.worktreeinclude` |
+| `yaamux --add-docs` | Copy this `YAAMUX.md` into the current repo |
+
+---
+
+## Starting agents
+
+Run from any git repo. Positional form: `yaamux [N] [type ...]`.
+
+```bash
+yaamux                          # 4 Claude agents (default)
+yaamux 6                        # 6 Claude agents
+yaamux claude gemini codex      # 3 agents — one of each (N = arg count)
+yaamux 8 claude gemini          # 8 agents — types cycled: c,g,c,g,c,g,c,g
+yaamux 1 codex                  # single Codex agent
+```
+
+- First arg numeric → that's **N**. Following args are a type pattern, cycled to fill N.
+- First arg a type → types are literal, **N** = number of args.
+- No args → 4 Claude agents.
+- Valid types: `claude` `gemini` `copilot` `codex`. Max 20 agents.
+
+Each repo gets its own tmux session: **`yaamux-<repo-name>`**. Run yaamux in
+multiple repos simultaneously without collision.
+
+---
+
+## Commands
+
+| Command | Action |
+|---------|--------|
+| `yaamux [N] [types...]` | Start (or attach if the repo's session exists) |
+| `--init [--with-docs]` | Scaffold AGENTS.md + `.yaamux/config` + `.worktreeinclude` |
+| `--list [--json]` | List yaamux sessions across all repos |
+| `--attach` | Re-attach to this repo's session |
+| `--kill` | Stop the session (worktrees kept) |
+| `--clean` [`--force`] | Remove clean worktrees; `--force` removes dirty ones too |
+| `--status` | Health check: session, panes, worktrees, notifications |
+| `--layout main\|tiled\|even` | Override the auto-picked pane layout |
+| `--zoom N` | Attach with pane N zoomed full-screen |
+| `--vscode N` | Hand pane N's session to VS Code for interactive dev |
+| `--send N "x"` | Inject a prompt into pane N without attaching |
+| `--exec N "x" [timeout]` | Headless: send, poll for idle, return output (5min default) |
+| `--broadcast "x"` | Send the same prompt to every pane |
+| `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
+| `--restart N` | Restart pane N (relaunches its agent type) |
+| `--logs` | Jump to the live-logs window |
+| `--sync` | Toggle synchronize-panes (keystrokes → all panes) |
+| `--yolo` | Modifier: launch agents with full permission bypass |
+| `--link-env` | Modifier: symlink `.env*` into worktrees (default: copy) |
+| `--setup-notify` | Configure ntfy push + Blink Shell deep links |
+| `--ssh-config` | (Re)generate the `~/.ssh/config` host block |
+| `--install-service` | macOS LaunchAgent — auto-start this repo's agents on login |
+| `--help` / `--version` | Inline help / version + install source |
+
+The `--yolo` and `--link-env` modifiers combine with positional args
+(e.g., `yaamux --yolo 4 claude` or `yaamux 2 --link-env`). Equivalent
+env vars: `YAAMUX_YOLO=1`, `YAAMUX_LINK_ENV=1`.
+
+---
+
+## tmux layout & navigation
+
+yaamux picks a layout based on N: 2=side-by-side, 3/5/6=one-driver-plus-others,
+4=2×2 grid, 7+=tiled grid. Override with `--layout main|tiled|even`.
+
+```
+window "agents"      window "remote-srv"    window "logs"
+ tiled grid of N      Claude Remote          tiled grid of N
+ agent panes          Control server         log tails
+                      (Claude panes only)
+```
+
+Prefix is **Ctrl+Space**.
+
+| Keys | Action |
+|------|--------|
+| `Ctrl+Space` + arrows | Move between panes |
+| `Ctrl+Space` + `Z` | Zoom / unzoom current pane |
+| `Ctrl+Space` + `W` | Window list (agents / remote-srv / logs) |
+| `Ctrl+Space` + `[` | Scroll mode (`q` to exit) |
+| `Ctrl+Space` + `y` | Copy selection → system clipboard |
+| `Ctrl+Space` + `S` | Toggle sync mode |
+| `Ctrl+Space` + `D` | Detach (agents keep running) |
+| Mouse click | Focus a pane |
+
+> macOS: `Ctrl+Space` may be the input-source switcher. Disable it under
+> System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
+
+---
+
+## Remote access
+
+### Universal — every agent type
+
+```bash
+mosh user@host -- tmux attach -t yaamux-<repo>      # preferred
+ssh  user@host -t 'tmux attach -t yaamux-<repo>'    # fallback
+```
+
+`yaamux --ssh-config` writes a `Host yaamux` block to `~/.ssh/config`.
+mosh survives sleep, network drops, and LTE↔WiFi handoffs — ideal for phones.
+
+### iPhone / iPad apps
+
+| App | Purpose |
+|-----|---------|
+| **Blink Shell** | Full terminal + mosh (one-time purchase) |
+| **Code App** (thebaselab) | SSH + git + Monaco editor (free) |
+| **Claude app** | Drive Claude sessions — Code tab (free) |
+| **ntfy** | Push notifications (free) |
+| **Tailscale** | Zero-config networking (free) |
+
+### Per-agent native remote
+
+| Agent | Remote path |
+|-------|-------------|
+| `claude` | claude.ai/code + Claude iOS app (`--remote-control`) |
+| `copilot` | GitHub Mobile app (`--remote`) |
+| `codex` | `codex --remote` TUI (needs app-server) |
+| `gemini` | mosh/Blink only — no native remote |
+
+---
+
+## Push notifications
+
+```bash
+yaamux --setup-notify
+```
+
+Configures **ntfy** push delivery and a **Blink Shell deep link** — one tap on
+the notification opens Blink, SSHes in, and zooms to the exact pane needing
+attention. Optional Slack webhook for parallel desktop alerts.
+
+Push fires for **Claude panes only** (uses Claude's hook system). For other
+agents, the tmux activity highlight (orange window tab) flags new output.
+
+Helper scripts (`yaamux-notify.sh`, `yaamux-mobile-attach.sh`) are generated
+automatically and self-heal if missing.
+
+---
+
+## VS Code handoff
+
+For UI-heavy work (React / Next.js + FastAPI) with inline diffs and live preview:
+
+```bash
+yaamux --vscode 1
+```
+
+Stops pane 1's agent (a session runs in one process at a time), opens that
+worktree in VS Code. Resume the conversation there via **Claude Code panel →
+Session History → Local tab**, or `claude --resume` in the integrated terminal.
+History is shared on disk (`~/.claude/projects/`).
+
+Run dev servers in VS Code's own terminals:
+
+```
+npm run dev                 # Next.js  → localhost:3000
+uvicorn main:app --reload   # FastAPI  → localhost:8000
+```
+
+Use `@terminal:<name>` in a prompt so Claude reads dev-server logs directly.
+
+---
+
+## The worktree model
+
+Each agent works in an isolated git worktree:
+
+```
+your-repo/                          ← main checkout
+your-repo-worktrees/
+├── agent-1/   branch: worktree/agent-1
+├── agent-2/   branch: worktree/agent-2
+└── …          (one per agent)
+```
+
+`.env*` files (and anything else in `.worktreeinclude`) from the repo root
+are **copied** into every worktree on creation. Edits to one agent's copy
+don't leak into others or back into the main repo. Pass `--link-env` (or
+set `YAAMUX_LINK_ENV=1`) for the legacy symlink behavior if you want a
+single source of truth.
+
+Merge work back with normal git (`git merge worktree/agent-2`) or
+`yaamux --pr N` to open a PR via `gh`. `yaamux --clean` skips worktrees with
+uncommitted / unpushed changes; `yaamux --clean --force` removes everything.
+
+---
+
+## Auto-accept flags
+
+Each agent type has two flag profiles: **SAFE** (default — agent still
+prompts on risky operations) and **YOLO** (full bypass — no human in the
+loop). Switch to YOLO with `yaamux --yolo …` or `YAAMUX_YOLO=1`.
+
+| Agent | SAFE (default) | YOLO (with `--yolo`) |
+|-------|---------------|----------------------|
+| `claude` | _(no flag)_ | `--dangerously-skip-permissions` |
+| `gemini` | `--approval-mode auto_edit` | `--yolo` |
+| `copilot` | `--allow-tool 'shell(git:*)'` | `--allow-all-tools` |
+| `codex` | `--full-auto` (keeps sandbox) | `--dangerously-bypass-approvals-and-sandbox` |
+
+Edit the `*_FLAGS_SAFE` / `*_FLAGS_YOLO` variables near the top of `yaamux`
+to taste. **Only use `--yolo` on code you trust** — agents can run any
+shell command without asking.
+
+---
+
+## Safety
+
+- `yaamux-guard.sh` blocks destructive shell patterns (`rm -rf /`, `mkfs`,
+  `dd of=/dev/…`) — but **only for Claude panes**. Other agents use their own
+  permission systems. Blocked attempts log to `.claude/logs/blocked.log`.
+- Auto-accept means no human in the loop per action — run agents on code you
+  trust, or use the softer flags / a container.
+
+---
+
+## Files yaamux creates
+
+After `yaamux --init`:
+```
+<repo>/AGENTS.md                ← canonical agent instructions (agents.md spec)
+<repo>/CLAUDE.md                ← symlink → AGENTS.md (for Claude Code)
+<repo>/.yaamux/config           ← per-project defaults
+<repo>/.worktreeinclude         ← which gitignored files to copy into worktrees
+<repo>/.gitignore               ← appended with .claude/logs/ and ../<repo>-worktrees/
+```
+
+After first `yaamux N [...]` run:
+```
+<repo>/.claude/
+├── settings.json
+├── hooks/yaamux-guard.sh
+├── hooks/yaamux-notify.sh         ← after --setup-notify
+└── logs/agent-*.log, blocked.log
+~/.local/bin/yaamux                ← if installed via --install (not via brew)
+~/.local/bin/yaamux-mobile-attach.sh ← after --setup-notify
+~/.config/yaamux/notify.conf       ← after --setup-notify
+~/.ssh/config                      ← yaamux host block appended
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `'<agent>' not found` | Install the CLI, or change the agent type |
+| `command not found: yaamux` | `brew install vihang/tap/yaamux`, or `~/.yaamux/yaamux --install` + `~/.local/bin` on PATH |
+| `gh CLI not found` (during `--pr`) | `brew install gh && gh auth login` |
+| Worktree skipped by `--clean` | It has uncommitted/unpushed work. Commit/push, or use `--clean --force` |
+| Claude Remote Control fails | Unset `ANTHROPIC_API_KEY`; run `claude auth login` |
+| `Ctrl+Space` does nothing | Disable the macOS input-source shortcut |
+| mosh won't connect | Open UDP 60000-61000, or use Tailscale |
+| Session already running | `--attach` to join, or `--kill` then restart |
+| A pane died | `yaamux --restart N` |

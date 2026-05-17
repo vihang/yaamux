@@ -1,0 +1,70 @@
+name: Release
+
+# Triggered when a v* tag is pushed (e.g., `git tag v0.1.0 && git push --tags`).
+# Builds the release tarball, computes SHA256, and opens a formula-bump PR
+# against vihang/homebrew-tap. Manual PR merge after smoke test.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify VERSION matches tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          file_ver="$(cat VERSION)"
+          if [ "$tag" != "$file_ver" ]; then
+            echo "Tag v$tag does not match VERSION file ($file_ver)" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "yaamux ${GITHUB_REF_NAME}" \
+            --generate-notes
+
+      - name: Compute tarball SHA256
+        id: sha
+        run: |
+          # GitHub generates the tarball at the predictable URL once the release exists.
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          curl -sL "$url" -o release.tar.gz
+          sha="$(sha256sum release.tar.gz | awk '{print $1}')"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "Tarball SHA256: $sha"
+
+      - name: Bump Homebrew tap formula
+        env:
+          TAP_PAT: ${{ secrets.TAP_PAT }}   # PAT with repo scope on vihang/homebrew-tap
+        if: env.TAP_PAT != ''
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          sha="${{ steps.sha.outputs.sha256 }}"
+          git clone "https://x-access-token:${TAP_PAT}@github.com/vihang/homebrew-tap.git" tap
+          cd tap
+          git config user.email "release-bot@yaamux"
+          git config user.name "yaamux-release-bot"
+          # Update url + sha in the formula
+          sed -i.bak \
+            -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${tag}.tar.gz\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" \
+            Formula/yaamux.rb
+          rm Formula/yaamux.rb.bak
+          branch="bump-yaamux-${tag}"
+          git checkout -b "$branch"
+          git commit -am "yaamux: ${tag}"
+          git push -u origin "$branch"
+          gh pr create --title "yaamux: ${tag}" --body "Auto-bump from release ${tag}" \
+            --base main --head "$branch"
+        # If TAP_PAT isn't configured, skip the bump and let it be done manually.

@@ -1,0 +1,13 @@
+# yaamux runtime artifacts — never commit
+.claude/logs/
+.claude/settings.json
+*-worktrees/
+
+# editor / OS noise
+.DS_Store
+*.swp
+*.bak
+
+# test scratch
+/tmp/yaamux-test/
+tests/tmp/

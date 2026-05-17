@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck bats tmux
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install shellcheck bats-core tmux
+
+      - name: Syntax check (main script)
+        run: bash -n yaamux
+
+      - name: Syntax check (embedded heredocs)
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          src = open('yaamux').read()
+          missing = []
+          for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF'):
+              m = re.search(r"<< '" + tag + r"'\n(.*?)\n" + tag + r"\n", src, re.S)
+              if m:
+                  open('/tmp/' + tag, 'w').write(m.group(1))
+              else:
+                  missing.append(tag)
+          if missing:
+              print('MISSING:', missing); sys.exit(1)
+          PY
+          for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF; do bash -n /tmp/$t; done
+
+      - name: shellcheck
+        run: shellcheck yaamux || true   # non-blocking until backlog #1 lands
+
+      - name: bats tests
+        run: bats tests/

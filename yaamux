@@ -1,0 +1,1095 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  yaamux — Agents Multiplexer
+#
+#  Spawn N AI coding agents in parallel, one per git worktree, in a tiled tmux
+#  grid. Manage them locally or from any device. Install once, use in every repo.
+#
+#  Supported agents:  claude · gemini · copilot · codex
+#
+#  ── Install (once) ──────────────────────────────────────────────────────────
+#    git clone <yaamux-repo> ~/.yaamux
+#    ~/.yaamux/yaamux --install            # symlinks yaamux into ~/.local/bin
+#
+#  ── Use (in any repo) ───────────────────────────────────────────────────────
+#    cd ~/projects/myapp
+#    yaamux                              # 4 Claude agents
+#    yaamux 6                            # 6 Claude agents
+#    yaamux claude gemini codex          # 3 agents, one of each
+#    yaamux 8 claude gemini              # 8 agents, types cycled
+#
+#  ── Manage ──────────────────────────────────────────────────────────────────
+#    yaamux --attach | --kill | --clean | --status | --list [--json]
+#    yaamux --zoom N | --vscode N | --send N "x" | --exec N "x" | --broadcast "x"
+#    yaamux --restart N | --logs | --sync | --pr N [title] [--merge]
+#    yaamux --setup-notify | --ssh-config | --install-service
+#    yaamux --init | --install | --update | --uninstall | --add-docs | --version
+#
+#  Each repo gets its own tmux session: yaamux-<repo-name>
+#  Prefix: Ctrl+Space
+#
+#  CAVEATS for non-Claude agents:
+#    - the destructive-command guard hook protects CLAUDE panes only
+#    - push notifications fire for CLAUDE panes only (hook-driven)
+# =============================================================================
+
+set -euo pipefail
+
+# ── Self-location (follows symlink to the real file in the yaamux repo) ─────────
+SELF="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+YAAMUX_HOME="$(dirname "$SELF")"
+
+# ── Project context ────────────────────────────────────────────────────────────
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+PROJECT_NAME="$(basename "$REPO_ROOT")"
+SESSION="yaamux-${PROJECT_NAME}"                 # one session per repo
+WORKTREES_BASE="${REPO_ROOT}/../${PROJECT_NAME}-worktrees"
+HOOKS_DIR="${REPO_ROOT}/.claude/hooks"
+LOG_DIR="${REPO_ROOT}/.claude/logs"
+NOTIFY_CONF="${HOME}/.config/yaamux/notify.conf"
+MOBILE_ATTACH="${HOME}/.local/bin/yaamux-mobile-attach.sh"
+
+# ── Defaults ───────────────────────────────────────────────────────────────────
+DEFAULT_AGENT="claude"
+DEFAULT_COUNT=4
+MAX_AGENTS=20
+SCROLLBACK=50000
+
+# ── Per-agent auto-accept flags ───────────────────────────────────────────────
+# Two profiles per agent: SAFE (default — agent still prompts on risky ops) and
+# YOLO (full bypass — no human in the loop). Switch to YOLO with --yolo or
+# YAAMUX_YOLO=1.  Tweak either set to taste.
+CLAUDE_FLAGS_SAFE=""
+CLAUDE_FLAGS_YOLO="--dangerously-skip-permissions"
+GEMINI_FLAGS_SAFE="--approval-mode auto_edit"
+GEMINI_FLAGS_YOLO="--yolo"
+COPILOT_FLAGS_SAFE="--allow-tool 'shell(git:*)'"
+COPILOT_FLAGS_YOLO="--allow-all-tools"
+CODEX_FLAGS_SAFE="--full-auto"
+CODEX_FLAGS_YOLO="--dangerously-bypass-approvals-and-sandbox"
+
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'
+BOLD='\033[1m'; NC='\033[0m'
+
+log()    { echo -e "${GREEN}[yaamux]${NC} $*"; }
+warn()   { echo -e "${YELLOW}[warn]${NC} $*"; }
+die()    { echo -e "${RED}[err]${NC}  $*" >&2; exit 1; }
+header() { echo -e "\n${BOLD}${CYAN}── $* ${NC}"; }
+
+# ── Agent helpers ─────────────────────────────────────────────────────────────
+agent_bin()  { case "$1" in claude)echo claude;; gemini)echo gemini;;
+                            copilot)echo copilot;; codex)echo codex;; *)echo "";; esac; }
+agent_icon() { case "$1" in claude)echo "🤖";; gemini)echo "✦";;
+                            copilot)echo "🐙";; codex)echo "⬡";; *)echo "❓";; esac; }
+agent_flags() {
+  # Pick per-agent flag profile based on YAAMUX_YOLO (set by --yolo or env).
+  local type="$1" suffix="SAFE"
+  [[ "${YAAMUX_YOLO:-0}" == "1" ]] && suffix="YOLO"
+  local var
+  case "$type" in
+    claude)  var="CLAUDE_FLAGS_${suffix}" ;;
+    gemini)  var="GEMINI_FLAGS_${suffix}" ;;
+    copilot) var="COPILOT_FLAGS_${suffix}" ;;
+    codex)   var="CODEX_FLAGS_${suffix}" ;;
+    *)       echo ""; return ;;
+  esac
+  echo "${!var}"
+}
+agent_cmd()  {
+  local type="$1" name="$2" flags
+  flags="$(agent_flags "$type")"
+  case "$type" in
+    claude)  echo "claude ${flags} --remote-control '${PROJECT_NAME}-${name}'" ;;
+    gemini)  echo "gemini ${flags}" ;;
+    copilot) echo "copilot ${flags} --remote" ;;
+    codex)   echo "codex ${flags}" ;;
+    *)       echo "echo 'Unknown agent type: ${type}'" ;;
+  esac
+}
+# Regex matched against the last non-empty captured line to detect "agent idle".
+# Imperfect — tune per agent as their TUIs evolve. Used by --exec polling.
+agent_idle_pattern() {
+  case "$1" in
+    claude)  echo '╰─.*─╯|^>[[:space:]]*$' ;;
+    gemini)  echo '^>[[:space:]]*$|gemini>' ;;
+    copilot) echo '^>[[:space:]]*$' ;;
+    codex)   echo '^>[[:space:]]*$' ;;
+    *)       echo '^>[[:space:]]*$' ;;
+  esac
+}
+
+# ── Path helpers ──────────────────────────────────────────────────────────────
+# Normalize a path for comparison: resolve symlinks, .., trailing slashes; tolerant
+# of non-existent paths. macOS BSD realpath lacks -m, so use python (always a dep).
+_norm_path() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"
+}
+# True if $1 (a worktree path) has uncommitted/untracked changes or commits
+# ahead of a reasonable base branch. Used by --clean to spare in-progress work.
+_worktree_is_dirty() {
+  local wt="$1"
+  [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]] && return 0
+  local base candidate count
+  for candidate in origin/HEAD origin/main origin/master main master; do
+    if git -C "$wt" rev-parse --verify "$candidate" &>/dev/null; then
+      base="$candidate"; break
+    fi
+  done
+  [[ -z "${base:-}" ]] && return 1
+  count="$(git -C "$wt" rev-list --count "${base}..HEAD" 2>/dev/null || echo 0)"
+  [[ "$count" -gt 0 ]]
+}
+
+# True if $1 matches any existing git worktree path (after normalization).
+_worktree_exists() {
+  local wt_real existing existing_real
+  wt_real="$(_norm_path "$1")"
+  while IFS= read -r existing; do
+    [[ -z "$existing" ]] && continue
+    existing_real="$(_norm_path "$existing")"
+    [[ "$existing_real" == "$wt_real" ]] && return 0
+  done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}')
+  return 1
+}
+
+# Patterns from .worktreeinclude — gitignore-syntax files to copy into worktrees.
+# Falls back to ".env*" if the file is missing (the historic yaamux behavior).
+_read_worktree_include() {
+  if [[ -f "${REPO_ROOT}/.worktreeinclude" ]]; then
+    grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "${REPO_ROOT}/.worktreeinclude" 2>/dev/null
+  else
+    echo '.env*'
+  fi
+}
+
+# Emit null-separated list of files matching .worktreeinclude patterns at $REPO_ROOT.
+_collect_include_files() {
+  local pattern
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    find "$REPO_ROOT" -maxdepth 1 -name "$pattern" \
+      ! -name '*.example' ! -name '*.sample' -type f -print0 2>/dev/null
+  done < <(_read_worktree_include)
+}
+
+# Pick a tmux layout for N panes. Override wins if set (main|tiled|even).
+# Defaults: 2=even-horizontal (side-by-side), 3/5/6=main-vertical (driver+supporting),
+# 4=tiled (clean 2x2), 1 / 7+ = tiled (n=1 is a no-op anyway).
+_layout_for() {
+  local n="$1" override="${2:-}"
+  if [[ -n "$override" ]]; then
+    case "$override" in
+      main)  echo "main-vertical"; return ;;
+      tiled) echo "tiled"; return ;;
+      even)  echo "even-horizontal"; return ;;
+      *)     warn "unknown layout '$override' — using tiled"; echo "tiled"; return ;;
+    esac
+  fi
+  case "$n" in
+    2)     echo "even-horizontal" ;;
+    3|5|6) echo "main-vertical" ;;
+    *)     echo "tiled" ;;
+  esac
+}
+
+# ── Tailscale hostname ─────────────────────────────────────────────────────────
+ts_hostname() {
+  command -v tailscale &>/dev/null && \
+    tailscale status --json 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('Self',{}).get('DNSName','').rstrip('.'))" \
+      2>/dev/null || true
+}
+HOST_DISPLAY="$(ts_hostname)"
+[[ -z "$HOST_DISPLAY" ]] && HOST_DISPLAY="$(hostname -f 2>/dev/null || hostname)"
+# Warn if hostname is local-only and notify is configured — remote push won't work.
+case "$HOST_DISPLAY" in
+  *.local|localhost) HOST_IS_LOCAL=true ;;
+  *)                 HOST_IS_LOCAL=false ;;
+esac
+
+# ── Notify config ──────────────────────────────────────────────────────────────
+[[ -f "$NOTIFY_CONF" ]] && source "$NOTIFY_CONF"
+NTFY_TOPIC="${NTFY_TOPIC:-}"
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+BLINK_SNIPPET_KEY="${BLINK_SNIPPET_KEY:-yaamux-attach}"
+
+# =============================================================================
+#  Embedded helper scripts (written to disk by --setup-notify)
+# =============================================================================
+_write_settings_json() {
+  local notify_block=""
+  if [[ -f "${HOOKS_DIR}/yaamux-notify.sh" ]]; then
+    notify_block=',
+    "Notification": [ { "hooks": [{ "type": "command", "command": "'${HOOKS_DIR}'/yaamux-notify.sh" }] } ],
+    "Stop":         [ { "hooks": [{ "type": "command", "command": "'${HOOKS_DIR}'/yaamux-notify.sh" }] } ]'
+  fi
+  cat > "${REPO_ROOT}/.claude/settings.json" << SETTINGS_EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "${HOOKS_DIR}/yaamux-guard.sh" }]
+      }
+    ]${notify_block}
+  }
+}
+SETTINGS_EOF
+}
+
+_write_guard_hook() {
+  mkdir -p "$HOOKS_DIR"
+  cat > "${HOOKS_DIR}/yaamux-guard.sh" << 'GUARD_EOF'
+#!/usr/bin/env bash
+# yaamux-guard.sh — blocks destructive shell patterns (Claude PreToolUse hook)
+PATTERNS=(
+  'rm[[:space:]]+-[a-zA-Z]*rf?[[:space:]]+/'
+  'rm[[:space:]]+-[a-zA-Z]*rf?[[:space:]]+~'
+  'rm[[:space:]]+-[a-zA-Z]*rf?[[:space:]]+\*'
+  'chmod[[:space:]]+-R[[:space:]]+777'
+  '>[[:space:]]*/etc/'
+  '\bmkfs\b'
+  'dd[[:space:]].*of=/dev/'
+)
+LOG="$(git rev-parse --show-toplevel 2>/dev/null || echo '.')/.claude/logs/blocked.log"
+mkdir -p "$(dirname "$LOG")"
+for p in "${PATTERNS[@]}"; do
+  if echo "${CLAUDE_TOOL_INPUT:-}" | grep -qE "$p"; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] BLOCKED: ${CLAUDE_TOOL_INPUT:-}" >> "$LOG"
+    echo "BLOCKED by yaamux-guard."; exit 2
+  fi
+done
+exit 0
+GUARD_EOF
+  chmod +x "${HOOKS_DIR}/yaamux-guard.sh"
+}
+
+_write_notify_hook() {
+  mkdir -p "$HOOKS_DIR"
+  cat > "${HOOKS_DIR}/yaamux-notify.sh" << 'NOTIFY_EOF'
+#!/usr/bin/env bash
+# yaamux-notify.sh — Claude hook → ntfy push + Blink Shell deep link
+# Auto-generated by: yaamux --setup-notify
+set -euo pipefail
+
+CONF="${HOME}/.config/yaamux/notify.conf"
+[[ -f "$CONF" ]] && source "$CONF"
+NTFY_TOPIC="${NTFY_TOPIC:-}"
+NTFY_SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+BLINK_SNIPPET_KEY="${BLINK_SNIPPET_KEY:-yaamux-attach}"
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+SSH_HOST="${SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
+SSH_USER="${SSH_USER:-$(whoami)}"
+MOBILE_ATTACH="${HOME}/.local/bin/yaamux-mobile-attach.sh"
+
+PAYLOAD="$(cat)"
+HOOK_EVENT="${CLAUDE_HOOK_EVENT_NAME:-${hook_event_name:-Notification}}"
+SESSION_ID="$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id','?')[:8])" 2>/dev/null || echo '?')"
+CWD="$(echo "$PAYLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd','?'))" 2>/dev/null || echo '?')"
+
+# Derive project + agent + session from the worktree path
+#   .../<project>-worktrees/agent-N
+WT_PARENT="$(basename "$(dirname "$CWD")")"
+PROJECT="${WT_PARENT%-worktrees}"
+[[ "$PROJECT" == "$WT_PARENT" ]] && PROJECT="$(basename "$CWD")"
+AGENT_NAME="$(basename "$CWD")"
+PANE_INDEX="0"
+[[ "$AGENT_NAME" =~ agent-([0-9]+) ]] && PANE_INDEX=$(( ${BASH_REMATCH[1]} - 1 ))
+TMUX_SESSION="${TMUX_SESSION:-yaamux-${PROJECT}}"
+
+case "$HOOK_EVENT" in
+  Notification) ICON="🤖"; PRIORITY="high";    TITLE="${AGENT_NAME} needs input"; TAGS="robot,bell" ;;
+  Stop)         ICON="✅"; PRIORITY="default"; TITLE="${AGENT_NAME} finished";    TAGS="white_check_mark" ;;
+  *)            ICON="ℹ️";  PRIORITY="default"; TITLE="${AGENT_NAME}: ${HOOK_EVENT}"; TAGS="information_source" ;;
+esac
+BODY="Project: ${PROJECT} | Session: ${SESSION_ID}"
+
+ATTACH_CMD="ssh -t ${SSH_USER}@${SSH_HOST} bash ${MOBILE_ATTACH} ${TMUX_SESSION} ${PANE_INDEX}"
+ENCODED="$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$ATTACH_CMD")"
+BLINK_URL="blinkshell://run?key=${BLINK_SNIPPET_KEY}&cmd=${ENCODED}"
+
+if [[ -n "$NTFY_TOPIC" ]]; then
+  curl -s \
+    -H "Title: ${ICON} ${TITLE}" \
+    -H "Priority: ${PRIORITY}" \
+    -H "Tags: ${TAGS}" \
+    -H "Click: ${BLINK_URL}" \
+    -H "Actions: view, Open in Blink, ${BLINK_URL}" \
+    -d "${BODY}" "${NTFY_SERVER}/${NTFY_TOPIC}" > /dev/null 2>&1 || true
+fi
+if [[ -n "$SLACK_WEBHOOK_URL" ]]; then
+  COLOR="warning"; [[ "$HOOK_EVENT" == "Stop" ]] && COLOR="good"
+  curl -s -X POST -H 'Content-type: application/json' \
+    --data "{\"text\":\"${ICON} *${TITLE}*\n${BODY}\",\"attachments\":[{\"color\":\"${COLOR}\"}]}" \
+    "$SLACK_WEBHOOK_URL" > /dev/null 2>&1 || true
+fi
+command -v osascript &>/dev/null && \
+  osascript -e "display notification \"${BODY}\" with title \"${ICON} ${TITLE}\" sound name \"Ping\"" 2>/dev/null || true
+exit 0
+NOTIFY_EOF
+  chmod +x "${HOOKS_DIR}/yaamux-notify.sh"
+  log "Wrote ${HOOKS_DIR}/yaamux-notify.sh"
+}
+
+_write_mobile_attach() {
+  mkdir -p "$(dirname "$MOBILE_ATTACH")"
+  cat > "$MOBILE_ATTACH" << 'MOBILE_EOF'
+#!/usr/bin/env bash
+# yaamux-mobile-attach.sh — phone-sized grouped tmux viewport
+# Auto-generated by: yaamux --setup-notify
+# Usage: yaamux-mobile-attach.sh [SESSION] [PANE_INDEX]
+set -euo pipefail
+SESSION="${1:-yaamux}"
+PANE_INDEX="${2:-0}"
+MOB="mob-$$"
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "❌  Session '$SESSION' not found. Start agents first: yaamux"
+  exit 1
+fi
+tmux new-session -d -s "$MOB" -t "$SESSION" 2>/dev/null || {
+  MOB="mob-$(date +%s)"; tmux new-session -d -s "$MOB" -t "$SESSION"; }
+tmux select-window -t "${MOB}:agents" 2>/dev/null || tmux select-window -t "${MOB}:0" 2>/dev/null || true
+tmux select-pane   -t "${MOB}:agents.${PANE_INDEX}" 2>/dev/null || true
+tmux resize-pane   -t "${MOB}:agents.${PANE_INDEX}" -Z 2>/dev/null || true
+tmux set-option -t "$MOB" status-left  "#[fg=colour46,bold] 📱 agent-$((PANE_INDEX+1)) "
+tmux set-option -t "$MOB" status-right "#[fg=colour226]mob | detach C-Space+D"
+echo "📱  ${SESSION} · agent-$((PANE_INDEX+1)) — detach: Ctrl+Space + D"
+trap "tmux kill-session -t '$MOB' 2>/dev/null || true" EXIT
+tmux attach -t "$MOB"
+MOBILE_EOF
+  chmod +x "$MOBILE_ATTACH"
+  log "Wrote ${MOBILE_ATTACH}"
+}
+
+_gen_ssh_config() {
+  local f="${HOME}/.ssh/config"
+  mkdir -p "$(dirname "$f")"; touch "$f"
+  sed -i.bak '/# BEGIN yaamux/,/# END yaamux/d' "$f" 2>/dev/null || true
+  cat >> "$f" << SSHCONF
+
+# BEGIN yaamux
+Host yaamux
+  HostName      ${HOST_DISPLAY}
+  User          $(whoami)
+  IdentityFile  ~/.ssh/id_ed25519
+  ServerAliveInterval 60
+  ServerAliveCountMax 3
+# END yaamux
+SSHCONF
+  log "SSH config written — 'ssh yaamux' works"
+}
+
+_install_launchagent() {
+  local plist="${HOME}/Library/LaunchAgents/com.yaamux.${PROJECT_NAME}.plist"
+  mkdir -p "$(dirname "$plist")"
+  cat > "$plist" << PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.yaamux.${PROJECT_NAME}</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>${SELF}</string></array>
+  <key>WorkingDirectory</key><string>${REPO_ROOT}</string>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>${LOG_DIR}/launchagent.log</string>
+  <key>StandardErrorPath</key><string>${LOG_DIR}/launchagent-err.log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>${HOME}</string>
+  </dict>
+</dict></plist>
+PLIST_EOF
+  launchctl unload "$plist" 2>/dev/null || true
+  launchctl load   "$plist"
+  log "LaunchAgent installed for ${PROJECT_NAME} — auto-starts on login"
+}
+
+# =============================================================================
+#  Install / lifecycle commands
+# =============================================================================
+_is_brew_install() {
+  command -v brew &>/dev/null || return 1
+  local prefix
+  prefix="$(brew --prefix 2>/dev/null)" || return 1
+  [[ -n "$prefix" && "$SELF" == "$prefix"/* ]]
+}
+
+_show_version() {
+  local version="dev" source="unknown"
+  [[ -f "${YAAMUX_HOME}/VERSION" ]] && version="$(cat "${YAAMUX_HOME}/VERSION")"
+  if _is_brew_install; then
+    source="brew"
+  elif git -C "$YAAMUX_HOME" rev-parse --git-dir &>/dev/null; then
+    local sha
+    sha="$(git -C "$YAAMUX_HOME" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    source="git@${sha}"
+  fi
+  echo "yaamux ${version} (${source})"
+}
+
+_strip_ansi() {
+  python3 -c 'import re,sys; print(re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", sys.stdin.read()))'
+}
+
+# Send a prompt to pane IDX, poll capture-pane for the agent's idle pattern
+# (stable capture + pattern match in tail-3), return captured output on idle
+# or on timeout. Exits non-zero on timeout. Used by --exec.
+_exec_pane() {
+  local idx="$1" prompt="$2" timeout="${3:-300}"
+  local type pattern
+  type="$(tmux show-option -p -v -t "${SESSION}:agents.${idx}" @yaamux-type 2>/dev/null || echo "$DEFAULT_AGENT")"
+  pattern="$(agent_idle_pattern "$type")"
+  tmux has-session -t "$SESSION" 2>/dev/null || { warn "No session ${SESSION}"; return 2; }
+  tmux send-keys -t "${SESSION}:agents.${idx}" "$prompt" Enter
+  local elapsed=0 captured="" prev=""
+  sleep 1
+  while [[ $elapsed -lt $timeout ]]; do
+    captured="$(tmux capture-pane -p -t "${SESSION}:agents.${idx}" 2>/dev/null | _strip_ansi)"
+    if [[ -n "$captured" && "$captured" == "$prev" ]] \
+       && echo "$captured" | tail -3 | grep -qE "$pattern"; then
+      printf '%s' "$captured"
+      return 0
+    fi
+    prev="$captured"
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  warn "exec timed out after ${timeout}s for agent-$((idx+1)) (${type})"
+  printf '%s' "$captured"
+  return 1
+}
+
+_pr_pane() {
+  local idx="$1" title="${2:-}" merge="${3:-false}"
+  local agent="agent-$((idx+1))"
+  local branch="worktree/${agent}"
+  local wt="${WORKTREES_BASE}/${agent}"
+  command -v gh &>/dev/null || die "gh CLI not found — brew install gh; gh auth login"
+  [[ -d "$wt" ]] || die "Worktree $wt not found."
+  local base="${YAAMUX_DEFAULT_BASE:-origin/main}"; base="${base#origin/}"
+  log "Pushing ${branch} to origin..."
+  git -C "$wt" push -u origin "$branch" || die "git push failed."
+  log "Creating PR (base: ${base})..."
+  local pr_args=(--fill --base "$base" --head "$branch")
+  [[ -n "$title" ]] && pr_args+=(--title "$title")
+  local pr_url
+  pr_url="$(gh pr create "${pr_args[@]}")" || die "gh pr create failed."
+  echo "$pr_url"
+  if [[ "$merge" == "true" ]]; then
+    log "Enabling auto-merge (squash)..."
+    gh pr merge --squash --auto "$pr_url" || die "gh pr merge --auto failed."
+    log "Auto-merge enabled. Run 'yaamux --clean' after merge completes to remove the worktree."
+  fi
+}
+
+_list_sessions() {
+  local format="${1:-human}"
+  local sessions
+  sessions="$(tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_windows}' 2>/dev/null | grep '^yaamux-' || true)"
+  if [[ -z "$sessions" ]]; then
+    [[ "$format" == "json" ]] && echo "[]" || log "No yaamux sessions running."
+    return
+  fi
+  if [[ "$format" == "json" ]]; then
+    # Build TSV in bash; pipe through python for safe JSON escaping.
+    local tsv="" name attached _w repo agents att
+    while IFS='|' read -r name attached _w; do
+      [[ -z "$name" ]] && continue
+      repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '')"
+      agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+      att="false"; [[ "$attached" -gt 0 ]] && att="true"
+      tsv+="${name}	${agents:-0}	${att}	${repo}"$'\n'
+    done <<< "$sessions"
+    printf '%s' "$tsv" | python3 -c '
+import json, sys
+items = []
+for line in sys.stdin.read().splitlines():
+    if not line: continue
+    parts = line.split("\t")
+    if len(parts) < 4: continue
+    items.append({"session": parts[0], "agents": int(parts[1]),
+                  "attached": parts[2] == "true", "repo": parts[3]})
+print(json.dumps(items, indent=2))
+'
+  else
+    printf "%-30s %-8s %-10s %s\n" "SESSION" "AGENTS" "ATTACHED" "REPO"
+    local name attached _w repo agents att_str
+    while IFS='|' read -r name attached _w; do
+      [[ -z "$name" ]] && continue
+      repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '?')"
+      agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+      att_str="no"; [[ "$attached" -gt 0 ]] && att_str="yes"
+      printf "%-30s %-8s %-10s %s\n" "$name" "${agents:-0}" "$att_str" "${repo:-?}"
+    done <<< "$sessions"
+  fi
+}
+
+_install_yaamux() {
+  local dest="${HOME}/.local/bin/yaamux"
+  mkdir -p "$(dirname "$dest")"
+  ln -sf "$SELF" "$dest"
+  chmod +x "$SELF"
+  log "Symlinked: $dest → $SELF"
+  case ":$PATH:" in
+    *":${HOME}/.local/bin:"*) log "~/.local/bin already on PATH — 'yaamux' is ready." ;;
+    *) warn "Add to your shell rc (~/.zshrc or ~/.bashrc):"
+       echo '      export PATH="$HOME/.local/bin:$PATH"' ;;
+  esac
+  log "Use it from any repo:  cd <project> && yaamux"
+}
+
+_update_yaamux() {
+  if _is_brew_install; then
+    log "Installed via Homebrew. Run: ${BOLD}brew upgrade yaamux${NC}"
+    return
+  fi
+  if git -C "$YAAMUX_HOME" rev-parse --git-dir &>/dev/null; then
+    log "Updating yaamux from $YAAMUX_HOME ..."
+    git -C "$YAAMUX_HOME" pull --ff-only && log "yaamux updated."
+  else
+    warn "yaamux is not inside a git repo ($YAAMUX_HOME) — nothing to update."
+  fi
+}
+
+_uninstall_yaamux() {
+  rm -f "${HOME}/.local/bin/yaamux"
+  log "Removed ~/.local/bin/yaamux symlink."
+  log "The yaamux repo at $YAAMUX_HOME and per-project .claude/ files are untouched."
+}
+
+_add_docs() {
+  if [[ -f "${YAAMUX_HOME}/YAAMUX.md" ]]; then
+    cp "${YAAMUX_HOME}/YAAMUX.md" "${REPO_ROOT}/YAAMUX.md"
+    log "Copied YAAMUX.md into ${REPO_ROOT}"
+  else
+    warn "YAAMUX.md not found in ${YAAMUX_HOME}"
+  fi
+}
+
+# Project-init writers (idempotent — never overwrite user content).
+_write_agents_md_stub() {
+  cat > "${REPO_ROOT}/AGENTS.md" << 'AGENTS_EOF'
+# AGENTS.md
+
+Agent instructions for this project. Read by Claude Code, Codex, Cursor,
+Aider, Gemini CLI, Copilot, and 60+ other tools — see https://agents.md/.
+
+## Setup commands
+<!-- e.g., `pnpm install`, `make setup` -->
+
+## Build / test
+<!-- e.g., `pnpm test`, `make test` -->
+
+## Code style
+<!-- e.g., TypeScript strict mode; single quotes; 2-space indent -->
+
+## PR guidelines
+<!-- e.g., one feature per PR; tests required; conventional commits -->
+
+## Notes for agents
+This project uses yaamux (https://github.com/vihang/yaamux) to orchestrate
+parallel agent worktrees. See YAAMUX.md for the per-pane CLI.
+AGENTS_EOF
+}
+
+_write_yaamux_config() {
+  mkdir -p "${REPO_ROOT}/.yaamux"
+  cat > "${REPO_ROOT}/.yaamux/config" << 'CFG_EOF'
+# yaamux per-project defaults — committable; safe to delete or edit.
+# Sourced on every yaamux run; applied only when corresponding CLI args are absent.
+YAAMUX_DEFAULT_PATTERN="claude"
+YAAMUX_DEFAULT_COUNT=4
+YAAMUX_DEFAULT_BASE="origin/main"
+CFG_EOF
+}
+
+_write_worktreeinclude_stub() {
+  cat > "${REPO_ROOT}/.worktreeinclude" << 'WTI_EOF'
+# .worktreeinclude — gitignore-syntax patterns of GITIGNORED files that
+# yaamux should copy into each agent worktree on creation. Same convention
+# Claude Code uses. Edit to add more secrets/state files.
+.env*
+WTI_EOF
+}
+
+_init_repo() {
+  local with_docs="${1:-}"
+
+  # AGENTS.md (canonical per agents.md — read by 60+ tools)
+  if [[ -f "${REPO_ROOT}/AGENTS.md" ]]; then
+    log "AGENTS.md already exists — keeping."
+  elif [[ -f "${REPO_ROOT}/CLAUDE.md" && ! -L "${REPO_ROOT}/CLAUDE.md" ]]; then
+    mv "${REPO_ROOT}/CLAUDE.md" "${REPO_ROOT}/AGENTS.md"
+    log "Renamed CLAUDE.md → AGENTS.md (canonical per agents.md spec)."
+  else
+    _write_agents_md_stub
+    log "Wrote AGENTS.md starter template."
+  fi
+
+  # CLAUDE.md → symlink to AGENTS.md (for Claude Code discovery)
+  if [[ -L "${REPO_ROOT}/CLAUDE.md" ]]; then
+    log "CLAUDE.md is already a symlink — keeping."
+  elif [[ -f "${REPO_ROOT}/CLAUDE.md" ]]; then
+    warn "CLAUDE.md exists as a separate file alongside AGENTS.md — leaving alone."
+  else
+    ln -s AGENTS.md "${REPO_ROOT}/CLAUDE.md"
+    log "Symlinked CLAUDE.md → AGENTS.md."
+  fi
+
+  # .yaamux/config (per-project defaults)
+  if [[ -f "${REPO_ROOT}/.yaamux/config" ]]; then
+    log ".yaamux/config already exists — keeping."
+  else
+    _write_yaamux_config
+    log "Wrote .yaamux/config (project defaults)."
+  fi
+
+  # .worktreeinclude (env+secret copy list)
+  if [[ -f "${REPO_ROOT}/.worktreeinclude" ]]; then
+    log ".worktreeinclude already exists — keeping."
+  else
+    _write_worktreeinclude_stub
+    log "Wrote .worktreeinclude (.env* copied into worktrees by default)."
+  fi
+
+  # .gitignore additions (only if .gitignore is present)
+  if [[ -f "${REPO_ROOT}/.gitignore" ]]; then
+    local added=0
+    for entry in ".claude/logs/" "../${PROJECT_NAME}-worktrees/"; do
+      if ! grep -qxF "$entry" "${REPO_ROOT}/.gitignore"; then
+        echo "$entry" >> "${REPO_ROOT}/.gitignore"
+        added=$((added+1))
+      fi
+    done
+    [[ $added -gt 0 ]] && log "Added $added entries to .gitignore."
+  fi
+
+  # Optional: copy YAAMUX.md if --with-docs
+  [[ "$with_docs" == "--with-docs" ]] && _add_docs
+
+  echo ""
+  log "${BOLD}yaamux initialized for ${PROJECT_NAME}.${NC}"
+  echo "  Try:    yaamux 2           (boots 2 agents)"
+  echo "  Manage: yaamux --list / --status / --kill / --clean"
+  echo "  Docs:   yaamux --add-docs  (copies YAAMUX.md into the repo)"
+}
+
+# =============================================================================
+#  Argument parsing
+# =============================================================================
+# Pre-extract global modifiers (--yolo, --layout) that combine with positional args.
+REMAINING=()
+YAAMUX_YOLO="${YAAMUX_YOLO:-0}"
+YAAMUX_LAYOUT="${YAAMUX_LAYOUT:-}"
+YAAMUX_LINK_ENV="${YAAMUX_LINK_ENV:-0}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yolo)       YAAMUX_YOLO=1 ;;
+    --layout)     YAAMUX_LAYOUT="${2:?--layout needs value: main|tiled|even}"; shift ;;
+    --layout=*)   YAAMUX_LAYOUT="${1#--layout=}" ;;
+    --link-env)   YAAMUX_LINK_ENV=1 ;;
+    *)            REMAINING+=("$1") ;;
+  esac
+  shift
+done
+set -- "${REMAINING[@]+"${REMAINING[@]}"}"
+export YAAMUX_YOLO YAAMUX_LAYOUT YAAMUX_LINK_ENV
+
+# Positional form:  yaamux [N] [type ...]   |   Flag form:  yaamux --xxx
+AGENT_TYPES=(); N=""; PATTERN=()
+if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
+  if [[ "$1" =~ ^[0-9]+$ ]]; then N="$1"; shift; fi
+  PATTERN=("$@")
+  shift $# 2>/dev/null || true
+fi
+
+# ── Flag commands ──────────────────────────────────────────────────────────────
+case "${1:-}" in
+  --install)        _install_yaamux;        exit 0 ;;
+  --update)         _update_yaamux;         exit 0 ;;
+  --uninstall)      _uninstall_yaamux;      exit 0 ;;
+  --add-docs)       _add_docs;            exit 0 ;;
+  --init)           _init_repo "${2:-}";    exit 0 ;;
+  --version)        _show_version;          exit 0 ;;
+
+  --list)
+    fmt="human"; [[ "${2:-}" == "--json" ]] && fmt="json"
+    _list_sessions "$fmt"; exit 0 ;;
+
+  --exec)
+    IDX=$(( ${2:?Usage: yaamux --exec N \"prompt\" [timeout_seconds]} - 1 ))
+    PROMPT="${3:?Usage: yaamux --exec N \"prompt\" [timeout_seconds]}"
+    TIMEOUT="${4:-300}"
+    _exec_pane "$IDX" "$PROMPT" "$TIMEOUT"
+    exit $? ;;
+
+  --pr)
+    IDX=$(( ${2:?Usage: yaamux --pr N [title] [--merge]} - 1 ))
+    TITLE=""; MERGE=false
+    for arg in "${@:3}"; do
+      case "$arg" in
+        --merge) MERGE=true ;;
+        *) [[ -z "$TITLE" ]] && TITLE="$arg" ;;
+      esac
+    done
+    _pr_pane "$IDX" "$TITLE" "$MERGE"
+    exit $? ;;
+  --ssh-config)     _gen_ssh_config;      exit 0 ;;
+  --install-service) _install_launchagent; exit 0 ;;
+
+  --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
+
+  --kill)
+    tmux kill-session -t "$SESSION" 2>/dev/null && log "Killed ${SESSION}." || warn "Not running."
+    exit 0 ;;
+
+  --clean)
+    force=false
+    [[ "${2:-}" == "--force" ]] && force=true
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    skipped=0
+    if [[ -d "$WORKTREES_BASE" ]]; then
+      for wt in "$WORKTREES_BASE"/agent-*; do
+        [[ -d "$wt" ]] || continue
+        a="$(basename "$wt")"
+        if ! $force && _worktree_is_dirty "$wt"; then
+          warn "Skipping $a — uncommitted/untracked changes or unpushed commits."
+          skipped=$((skipped+1))
+          continue
+        fi
+        git worktree remove --force "$wt" 2>/dev/null && log "Removed $a" || true
+        git branch -D "worktree/${a}" 2>/dev/null || true
+      done
+    fi
+    log "Clean complete."
+    [[ $skipped -gt 0 ]] && log "Use ${BOLD}--clean --force${NC} to remove the $skipped skipped worktree(s)."
+    exit 0 ;;
+
+  --status)
+    header "session: ${SESSION}"
+    tmux list-windows -t "$SESSION" 2>/dev/null || echo "  Not running"
+    header "panes"
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux list-panes -t "${SESSION}:agents" \
+        -F "  pane #{pane_index}: #{pane_title}  dead=#{pane_dead}" 2>/dev/null
+    else echo "  —"; fi
+    header "worktrees"; git worktree list 2>/dev/null
+    header "notifications"
+    [[ -n "$NTFY_TOPIC" ]] && echo "  ntfy: ${NTFY_SERVER}/${NTFY_TOPIC} (Claude panes)" \
+      || echo "  not configured — run: yaamux --setup-notify"
+    exit 0 ;;
+
+  --zoom)
+    IDX=$(( ${2:?Usage: yaamux --zoom N} - 1 ))
+    tmux select-window -t "${SESSION}:agents"
+    tmux select-pane -t "${SESSION}:agents.${IDX}"
+    tmux resize-pane -t "${SESSION}:agents.${IDX}" -Z
+    tmux attach -t "$SESSION"; exit 0 ;;
+
+  --vscode|--code)
+    IDX=$(( ${2:?Usage: yaamux --vscode N} - 1 ))
+    WPATH="${WORKTREES_BASE}/agent-$((IDX+1))"
+    [[ -d "$WPATH" ]] || die "agent-$((IDX+1)) worktree not found."
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      warn "Stopping agent-$((IDX+1)) so its session can be resumed in VS Code..."
+      tmux send-keys -t "${SESSION}:agents.${IDX}" C-c "" Enter; sleep 1
+    fi
+    command -v code &>/dev/null || \
+      die "'code' not in PATH. VS Code: Cmd+Shift+P → 'Shell Command: Install code command'"
+    code "$WPATH"
+    log "Opened ${WPATH} in VS Code."
+    echo -e "  Resume the session: Claude Code panel → Session History → Local tab"
+    echo -e "  or in the integrated terminal:  claude --resume"
+    exit 0 ;;
+
+  --send)
+    IDX=$(( ${2:?Usage: yaamux --send N \"prompt\"} - 1 ))
+    PROMPT="${3:?Usage: yaamux --send N \"prompt\"}"
+    tmux send-keys -t "${SESSION}:agents.${IDX}" "$PROMPT" Enter
+    log "Sent to agent-$((IDX+1))."; exit 0 ;;
+
+  --broadcast)
+    PROMPT="${2:?Usage: yaamux --broadcast \"prompt\"}"
+    CNT=$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')
+    for ((i=0; i<CNT; i++)); do tmux send-keys -t "${SESSION}:agents.${i}" "$PROMPT" Enter; done
+    log "Broadcast to ${CNT} agents."; exit 0 ;;
+
+  --restart)
+    IDX=$(( ${2:?Usage: yaamux --restart N} - 1 ))
+    type="$(tmux show-option -p -v -t "${SESSION}:agents.${IDX}" @yaamux-type 2>/dev/null || echo '')"
+    [[ -z "$type" ]] && type="$DEFAULT_AGENT"
+    log "Restarting agent-$((IDX+1)) (${type})..."
+    tmux send-keys -t "${SESSION}:agents.${IDX}" C-c "" Enter; sleep 0.5
+    tmux send-keys -t "${SESSION}:agents.${IDX}" "$(agent_cmd "$type" "agent-$((IDX+1))")" Enter
+    log "Restarted."; exit 0 ;;
+
+  --logs)
+    WIN="logs"
+    if ! tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WIN"; then
+      die "No logs window — start yaamux first."
+    fi
+    tmux select-window -t "${SESSION}:${WIN}"; tmux attach -t "$SESSION"; exit 0 ;;
+
+  --sync)
+    CUR=$(tmux show-window-options -t "${SESSION}:agents" synchronize-panes 2>/dev/null | awk '{print $2}')
+    if [[ "$CUR" == "on" ]]; then
+      tmux set-window-option -t "${SESSION}:agents" synchronize-panes off; log "Sync OFF"
+    else
+      tmux set-window-option -t "${SESSION}:agents" synchronize-panes on
+      warn "Sync ON — keystrokes go to ALL panes. Run --sync again to disable."
+    fi; exit 0 ;;
+
+  --setup-notify)
+    echo -e "\n${BOLD}yaamux notification setup${NC}"
+    echo "Push fires for CLAUDE panes only (hook-driven). Others: tmux activity highlight."
+    echo ""
+    read -rp "ntfy topic (random string = password): " TOPIC
+    read -rp "ntfy server [https://ntfy.sh]: " SERVER; SERVER="${SERVER:-https://ntfy.sh}"
+    read -rp "Blink snippet key [yaamux-attach]: " BK; BK="${BK:-yaamux-attach}"
+    read -rp "Slack webhook URL (optional): " SLACK
+    mkdir -p "$(dirname "$NOTIFY_CONF")"
+    cat > "$NOTIFY_CONF" << CONF
+NTFY_TOPIC="${TOPIC}"
+NTFY_SERVER="${SERVER}"
+BLINK_SNIPPET_KEY="${BK}"
+SSH_HOST="${HOST_DISPLAY}"
+SSH_USER="$(whoami)"
+SLACK_WEBHOOK_URL="${SLACK}"
+CONF
+    chmod 600 "$NOTIFY_CONF"
+    _write_notify_hook
+    _write_mobile_attach
+    _write_settings_json
+    echo ""
+    log "Done. In the ntfy app, subscribe to topic '${TOPIC}' on ${SERVER}"
+    log "Blink snippet '${BK}' → ssh -t $(whoami)@${HOST_DISPLAY} bash ${MOBILE_ATTACH} ${SESSION} 0"
+    exit 0 ;;
+
+  --help|-h)
+    sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+
+  "") : ;;
+  *) die "Unknown flag: $1   (try: yaamux --help)" ;;
+esac
+
+# =============================================================================
+#  START — resolve N + agent types
+# =============================================================================
+# Per-project defaults (.yaamux/config) — overridden by CLI args
+# shellcheck disable=SC1091
+[[ -f "${REPO_ROOT}/.yaamux/config" ]] && source "${REPO_ROOT}/.yaamux/config" 2>/dev/null || true
+
+if [[ -z "$N" && ${#PATTERN[@]} -eq 0 ]]; then
+  N="${YAAMUX_DEFAULT_COUNT:-$DEFAULT_COUNT}"
+elif [[ -z "$N" ]]; then
+  N=${#PATTERN[@]}
+fi
+[[ "$N" -lt 1 ]] && die "Need at least 1 agent."
+[[ "$N" -gt $MAX_AGENTS ]] && die "Max ${MAX_AGENTS} agents (asked for ${N})."
+if [[ ${#PATTERN[@]} -eq 0 ]]; then
+  if [[ -n "${YAAMUX_DEFAULT_PATTERN:-}" ]]; then
+    # shellcheck disable=SC2206
+    PATTERN=(${YAAMUX_DEFAULT_PATTERN})
+  else
+    PATTERN=("$DEFAULT_AGENT")
+  fi
+fi
+for ((i=0; i<N; i++)); do
+  AGENT_TYPES+=("${PATTERN[$((i % ${#PATTERN[@]}))]}")
+done
+
+# Build agent-name list
+AGENTS=()
+for ((i=1; i<=N; i++)); do AGENTS+=("agent-${i}"); done
+
+# ── Pre-flight ─────────────────────────────────────────────────────────────────
+command -v tmux &>/dev/null || die "tmux not found — brew install tmux"
+command -v git  &>/dev/null || die "git not found"
+
+log "Project:   ${PROJECT_NAME}   (session: ${SESSION})"
+log "Agents:    ${N}"
+log "Host:      ${HOST_DISPLAY}"
+
+header "agent line-up"
+MISSING=()
+HAS_CLAUDE=false
+for i in "${!AGENT_TYPES[@]}"; do
+  t="${AGENT_TYPES[$i]}"; bin="$(agent_bin "$t")"
+  [[ "$t" == "claude" ]] && HAS_CLAUDE=true
+  [[ -z "$bin" ]] && die "Invalid agent type '${t}'. Use: claude|gemini|copilot|codex"
+  if command -v "$bin" &>/dev/null; then
+    echo -e "  $(agent_icon "$t") ${AGENTS[$i]} → ${BOLD}${t}${NC}"
+  else
+    echo -e "  $(agent_icon "$t") ${AGENTS[$i]} → ${RED}${t} — '${bin}' not installed${NC}"
+    MISSING+=("$t")
+  fi
+done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  echo ""
+  warn "Install missing CLIs:"
+  for m in $(printf '%s\n' "${MISSING[@]}" | sort -u); do
+    case "$m" in
+      claude)  echo "    npm install -g @anthropic-ai/claude-code" ;;
+      gemini)  echo "    npm install -g @google/gemini-cli" ;;
+      copilot) echo "    npm install -g @github/copilot" ;;
+      codex)   echo "    npm install -g @openai/codex" ;;
+    esac
+  done
+  die "Install the above, or pick different agent types."
+fi
+
+MOSH_OK=false
+command -v mosh &>/dev/null && MOSH_OK=true || warn "mosh not found — brew install mosh"
+[[ -n "${ANTHROPIC_API_KEY:-}" ]] && $HAS_CLAUDE && \
+  warn "ANTHROPIC_API_KEY set — Claude Remote Control needs claude.ai OAuth"
+[[ -n "${NTFY_TOPIC:-}" ]] && $HOST_IS_LOCAL && \
+  warn "Local-only hostname '${HOST_DISPLAY}' — push notifications won't be reachable remotely. Install tailscale or set SSH_HOST in $NOTIFY_CONF."
+[[ "$YAAMUX_YOLO" == "1" ]] && \
+  warn "YOLO mode — agents will run with full permission bypass. ${BOLD}Run on code you trust.${NC}"
+
+# ── Hooks + settings ───────────────────────────────────────────────────────────
+mkdir -p "$HOOKS_DIR" "$LOG_DIR"
+_write_guard_hook
+[[ -f "${REPO_ROOT}/.claude/settings.json" ]] || _write_settings_json
+# self-heal notify scripts if configured but missing
+if [[ -f "$NOTIFY_CONF" ]]; then
+  [[ -f "${HOOKS_DIR}/yaamux-notify.sh" ]] || { _write_notify_hook; _write_settings_json; }
+  [[ -f "$MOBILE_ATTACH" ]]              || _write_mobile_attach
+fi
+
+# ── Files to copy/link into each worktree (default .env*; extend via .worktreeinclude)
+INCLUDE_FILES=()
+while IFS= read -r -d '' f; do INCLUDE_FILES+=("$f"); done < <(_collect_include_files)
+
+# ── Worktrees ──────────────────────────────────────────────────────────────────
+IS_GIT=true; git rev-parse --is-inside-work-tree &>/dev/null || IS_GIT=false
+mkdir -p "$WORKTREES_BASE"
+for agent in "${AGENTS[@]}"; do
+  WPATH="${WORKTREES_BASE}/${agent}"; BRANCH="worktree/${agent}"
+  if [[ "$IS_GIT" == "true" ]] && ! _worktree_exists "$WPATH"; then
+    git show-ref --quiet "refs/heads/${BRANCH}" || git branch "$BRANCH" HEAD
+    git worktree add "$WPATH" "$BRANCH"; log "Created worktree: ${agent}"
+  else
+    mkdir -p "$WPATH"
+  fi
+  for envfile in "${INCLUDE_FILES[@]+"${INCLUDE_FILES[@]}"}"; do
+    dest="${WPATH}/$(basename "$envfile")"
+    [[ -e "$dest" || -L "$dest" ]] && continue   # don't clobber agent edits
+    if [[ "$YAAMUX_LINK_ENV" == "1" ]]; then
+      ln -sf "$envfile" "$dest"
+    else
+      cp "$envfile" "$dest"
+    fi
+  done
+done
+
+grep -q "# BEGIN yaamux" "${HOME}/.ssh/config" 2>/dev/null || _gen_ssh_config
+
+# ── tmux session ───────────────────────────────────────────────────────────────
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  warn "Session ${SESSION} already running — attaching."
+  tmux attach -t "$SESSION"; exit 0
+fi
+
+tmux new-session -d -s "$SESSION" -n "agents" -c "${WORKTREES_BASE}/agent-1"
+
+# Metadata (yaamux user-options — consumed by --list, --restart, etc.)
+tmux set-option -t "$SESSION" @yaamux-repo "$REPO_ROOT"
+
+# Options
+tmux set-option -g -t "$SESSION" history-limit $SCROLLBACK
+tmux set-option    -t "$SESSION" prefix C-Space
+tmux unbind-key    -T prefix C-b
+tmux bind-key      -T prefix C-Space send-prefix
+tmux bind-key      -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "pbcopy"
+tmux bind-key      -T copy-mode    y     send-keys -X copy-pipe-and-cancel "pbcopy"
+tmux bind-key      -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "pbcopy"
+tmux bind-key      -T prefix S set-window-option synchronize-panes \; \
+  display-message "sync: #{?synchronize-panes,ON,OFF}"
+tmux set-option    -t "$SESSION" mouse on
+tmux set-option    -t "$SESSION" monitor-activity on
+tmux set-option    -t "$SESSION" visual-activity off
+tmux set-option    -t "$SESSION" pane-border-status top
+tmux set-option    -t "$SESSION" pane-border-format \
+  " #[bold]#{pane_title}#[nobold] #{?pane_active,#[fg=colour46]●,#[fg=colour238]○} "
+tmux set-option    -t "$SESSION" status on
+tmux set-option    -t "$SESSION" status-interval 5
+tmux set-option    -t "$SESSION" status-style "bg=colour235 fg=white"
+tmux set-option    -t "$SESSION" status-left \
+  "#{?client_prefix,#[fg=colour226 bold]⌨ ,}#[fg=colour46 bold] ◉ ${SESSION} #[fg=white]│ #[fg=colour39] #(git -C '${REPO_ROOT}' rev-parse --abbrev-ref HEAD 2>/dev/null || echo '—') #[fg=white]│ #[fg=colour226]#{?synchronize-panes,⚡SYNC ,}#[fg=white]"
+tmux set-option    -t "$SESSION" status-left-length 120
+tmux set-option    -t "$SESSION" status-right \
+  "#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+Z zoom"
+tmux set-option    -t "$SESSION" window-status-current-style  "bg=colour27 fg=white bold"
+tmux set-option    -t "$SESSION" window-status-activity-style "bg=colour130 fg=white bold"
+tmux set-option    -t "$SESSION" pane-active-border-style "fg=colour46"
+tmux set-option    -t "$SESSION" pane-border-style "fg=colour238"
+
+# Build N panes — layout picked by _layout_for (function of N, --layout override)
+LAYOUT="$(_layout_for "$N" "$YAAMUX_LAYOUT")"
+for ((i=1; i<N; i++)); do
+  tmux split-window -t "${SESSION}:agents" -c "${WORKTREES_BASE}/agent-$((i+1))"
+  tmux select-layout -t "${SESSION}:agents" "$LAYOUT"
+done
+tmux select-layout -t "${SESSION}:agents" "$LAYOUT"
+
+# remote-srv window (only if a Claude pane exists)
+if $HAS_CLAUDE; then
+  tmux new-window -t "$SESSION" -n "remote-srv" -c "$REPO_ROOT"
+fi
+
+# logs window — N panes tiled
+tmux new-window -t "$SESSION" -n "logs" -c "$LOG_DIR"
+for ((i=1; i<N; i++)); do
+  tmux split-window -t "${SESSION}:logs" -c "$LOG_DIR"
+  tmux select-layout -t "${SESSION}:logs" tiled
+done
+tmux select-layout -t "${SESSION}:logs" tiled
+
+# ── Launch agents ──────────────────────────────────────────────────────────────
+for i in "${!AGENTS[@]}"; do
+  agent="${AGENTS[$i]}"; type="${AGENT_TYPES[$i]}"
+  LOG_FILE="${LOG_DIR}/${agent}.log"
+  tmux select-pane -t "${SESSION}:agents.${i}" -T "$(agent_icon "$type") ${agent} · ${type}"
+  tmux set-option  -p -t "${SESSION}:agents.${i}" @yaamux-type "$type"
+  tmux pipe-pane   -t "${SESSION}:agents.${i}" -o "cat >> ${LOG_FILE}"
+  tmux send-keys   -t "${SESSION}:agents.${i}" "$(agent_cmd "$type" "$agent")" Enter
+  tmux select-pane -t "${SESSION}:logs.${i}" -T "📋 ${agent}"
+  tmux send-keys   -t "${SESSION}:logs.${i}" \
+    "tail -f ${LOG_FILE} 2>/dev/null || { sleep 2; exec tail -f ${LOG_FILE}; }" Enter
+done
+
+# remote-control server (Claude)
+if $HAS_CLAUDE; then
+  tmux select-pane -t "${SESSION}:remote-srv.0" -T "🌐 remote-srv"
+  tmux send-keys   -t "${SESSION}:remote-srv" \
+    "claude remote-control --spawn worktree --capacity ${N} --name '${PROJECT_NAME}'" Enter
+fi
+
+tmux select-window -t "${SESSION}:agents"
+tmux select-pane   -t "${SESSION}:agents.0"
+
+# ── Summary ────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}${BOLD} yaamux · ${PROJECT_NAME} · ${N} agents${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+for i in "${!AGENTS[@]}"; do
+  echo -e "   $(agent_icon "${AGENT_TYPES[$i]}") ${AGENTS[$i]} → ${AGENT_TYPES[$i]}"
+done
+echo ""
+echo -e " ${CYAN}Remote:${NC}"
+if $MOSH_OK; then
+  echo -e "   mosh $(whoami)@${HOST_DISPLAY} -- tmux attach -t ${SESSION}"
+else
+  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'tmux attach -t ${SESSION}'"
+fi
+$HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
+echo ""
+echo -e " ${CYAN}Manage:${NC}  yaamux --send N \"x\" · --broadcast \"x\" · --restart N · --vscode N · --logs"
+echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+tmux attach -t "$SESSION"
