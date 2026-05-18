@@ -1096,8 +1096,8 @@ In-session keys (press Ctrl+Space, then the key):
   Z            zoom / unzoom current pane
   W            window list (agents / remote-srv / logs)
   S            toggle sync mode (broadcast input to all panes)
-  [            scroll mode (q exits, / searches)
-  y            copy selection → system clipboard
+  [            enter scroll mode  (q exits, / searches)
+   ↳ y, Enter  (in scroll mode) copy selection → system clipboard
   r            restart the agent in the current pane
   R            restart every dead / idle agent (confirms)
   L            clear screen + scrollback (fixes a garbled pane)
@@ -1631,8 +1631,11 @@ tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
 tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
   "run-shell -b '${SELF} --restart-dead -y'"
 tmux bind-key      -T prefix L send-keys C-l \; clear-history
+# display-popup requires tmux 3.2+; suppress bind failure on older tmux so
+# session startup still succeeds (the popup just won't be available there;
+# `yaamux --keys` still works from any shell).
 tmux bind-key      -T prefix '?' display-popup -E -w 88 -h 40 \
-  "'${SELF}' --keys | less -R"
+  "'${SELF}' --keys | less -R" 2>/dev/null || true
 tmux bind-key      -T prefix '/' list-keys
 tmux set-option    -t "$SESSION" mouse on
 tmux set-option    -t "$SESSION" monitor-activity on
