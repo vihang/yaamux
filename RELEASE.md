@@ -45,10 +45,16 @@ git push --tags
 The release workflow (`.github/workflows/release.yml`) will:
 1. Create the GitHub Release with auto-generated notes
 2. Compute the tarball SHA256
-3. If `TAP_PAT` secret is set on yaamux repo, open a formula-bump PR against
-   `vihang/homebrew-tap` with the correct URL + SHA
+3. If `TAP_PAT` secret is set on yaamux repo, copy the source `Formula/yaamux.rb`
+   into `vihang/homebrew-tap`, patch in the tagged URL + SHA, open a bump PR,
+   and auto-merge it (squash + delete branch). The full formula is copied so
+   any dep/test changes in the template flow through — only `url` and `sha256`
+   are substituted.
 
 If `TAP_PAT` isn't set, do step 4 manually instead.
+
+To re-run for an existing tag (e.g. backfill), trigger the workflow manually:
+`gh workflow run release.yml -f tag=v0.1.2`.
 
 ## Step 4 — (Manual fallback) Bump the formula SHA
 
@@ -83,11 +89,39 @@ yaamux 2   # opens tmux with 2 claude panes
 If anything is wrong, fix locally, bump VERSION, tag a new patch version, and
 the release workflow re-runs.
 
-## Step 6 — Optional: set up TAP_PAT for future auto-bumps
+## Step 6 — Set up TAP_PAT for auto-bumps
 
-1. Create a fine-grained PAT with `Contents: write` on `vihang/homebrew-tap`.
-2. Add it as a secret named `TAP_PAT` to `vihang/yaamux`.
-3. Next `git tag v*` push will auto-open a bump PR against the tap.
+Without this secret, the release workflow still tags and creates a GitHub
+release, but the homebrew tap stays stale and you have to bump it by hand.
+
+1. **Create the PAT** at https://github.com/settings/personal-access-tokens/new
+   - Resource owner: `vihang`
+   - Repository access: **Only select repositories** → `vihang/homebrew-tap`
+   - Repository permissions:
+     - `Contents`: **Read and write**
+     - `Pull requests`: **Read and write**
+   - Expiration: pick a date you'll remember to rotate (1 year is fine).
+   - Copy the token (`github_pat_…`) immediately — it's shown only once.
+
+2. **Add it as a secret to `vihang/yaamux`**:
+   ```bash
+   gh secret set TAP_PAT --repo vihang/yaamux
+   # paste the token when prompted
+   ```
+   Or via the UI: Settings → Secrets and variables → Actions → New repository
+   secret → name `TAP_PAT`, value = the PAT.
+
+3. **(Optional) Enable auto-merge** on `vihang/homebrew-tap` if you've set up
+   branch protection: Settings → General → "Allow auto-merge". On personal
+   repos without protection the workflow merges the PR immediately, so this
+   only matters if you add required checks later.
+
+4. **Verify** by triggering a backfill against an existing tag:
+   ```bash
+   gh workflow run release.yml --repo vihang/yaamux -f tag=v0.1.2
+   gh run watch --repo vihang/yaamux
+   ```
+   You should see a `bump-yaamux-v0.1.2` PR appear and merge on the tap.
 
 ## Releases after v0.1.0
 
