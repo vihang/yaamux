@@ -141,6 +141,11 @@ The `yaamux` file is ordered top-to-bottom as:
   icons already defined.
 - When adding a flag: add it to the `case` block, the `--help` header comment
   block (lines ~15–40), the summary footer if relevant, and `YAAMUX.md`.
+- When adding a tmux key binding (any new `tmux bind-key -T prefix …` line in
+  the start sequence): also add a row to `_print_keys()` (`In-session keys`
+  section) and to the shortcuts table in `YAAMUX.md`. The `Ctrl+Space + ?`
+  popup is the user's only in-session reference — a binding that isn't listed
+  there is effectively undiscoverable.
 
 ---
 
@@ -202,6 +207,8 @@ Open backlog (small / platform / hygiene items not yet in v0.2 roadmap):
 - [ ] `YAAMUX.md` updated if behavior/flags changed
 - [ ] `README.md` updated if install flow changed
 - [ ] `AGENTS.md` updated if architecture changed
+- [ ] If a new tmux key binding was added: `_print_keys()` and the
+      `YAAMUX.md` shortcuts table both list it
 - [ ] Commit message: imperative mood, scoped — e.g. `yaamux: add --list flag`
 
 ---

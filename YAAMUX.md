@@ -116,7 +116,11 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `D` | Detach (agents keep running) |
+| `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
+| `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
+
+Run `yaamux --keys` from any shell for the same cheat sheet (no tmux needed).
 
 > macOS: `Ctrl+Space` may be the input-source switcher. Disable it under
 > System Settings → Keyboard → Keyboard Shortcuts → Input Sources.

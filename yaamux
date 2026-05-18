@@ -26,7 +26,7 @@
 #    yaamux --setup-notify | --ssh-config | --install-service
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
 #    yaamux --remote-hosts
-#    yaamux --init | --install | --update | --uninstall | --add-docs | --version
+#    yaamux --init | --install | --update | --uninstall | --add-docs | --version | --keys
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
 #  Prefix: Ctrl+Space
@@ -1086,6 +1086,44 @@ _remote_hosts_show() {
   log "Use:    yaamux --remote <alias>"
 }
 
+_print_keys() {
+  cat << 'KEYS'
+yaamux — keyboard & command cheat sheet         prefix: Ctrl+Space
+
+In-session keys (press Ctrl+Space, then the key):
+
+  arrows       move between panes
+  Z            zoom / unzoom current pane
+  W            window list (agents / remote-srv / logs)
+  S            toggle sync mode (broadcast input to all panes)
+  [            scroll mode (q exits, / searches)
+  y            copy selection → system clipboard
+  r            restart the agent in the current pane
+  R            restart every dead / idle agent (confirms)
+  L            clear screen + scrollback (fixes a garbled pane)
+  D            detach (agents keep running)
+  ?            this cheat sheet
+  /            list all tmux key bindings
+  Mouse click  focus a pane
+
+yaamux CLI (from any shell inside the repo):
+
+  yaamux --attach              re-attach to this session
+  yaamux --status              per-pane health snapshot
+  yaamux --send N "text"       send text to pane N (1-based)
+  yaamux --broadcast "text"    send to every pane
+  yaamux --exec N "cmd"        run shell command in pane N
+  yaamux --restart N           relaunch the agent in pane N
+  yaamux --zoom N              attach with pane N zoomed
+  yaamux --logs                tail combined agent logs
+  yaamux --pr N [title]        open PR for pane N's worktree
+  yaamux --kill                kill this session
+  yaamux --clean               remove stale worktrees
+  yaamux --remote <host>       pick + attach to a remote session
+  yaamux --remote-hosts        list saved host aliases
+KEYS
+}
+
 _remote_help() {
   cat << HELP
 yaamux --remote — operate on yaamux sessions over SSH
@@ -1227,6 +1265,7 @@ case "${1:-}" in
   --add-docs)       _add_docs;            exit 0 ;;
   --init)           _init_repo "${2:-}";    exit 0 ;;
   --version)        _show_version;          exit 0 ;;
+  --keys)           _print_keys;            exit 0 ;;
 
   --list)
     fmt="human"; [[ "${2:-}" == "--json" ]] && fmt="json"
@@ -1589,6 +1628,9 @@ tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
 tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
   "run-shell -b '${SELF} --restart-dead -y'"
 tmux bind-key      -T prefix L send-keys C-l \; clear-history
+tmux bind-key      -T prefix '?' display-popup -E -w 84 -h 36 \
+  "'${SELF}' --keys | less -R"
+tmux bind-key      -T prefix '/' list-keys
 tmux set-option    -t "$SESSION" mouse on
 tmux set-option    -t "$SESSION" monitor-activity on
 tmux set-option    -t "$SESSION" visual-activity off
@@ -1606,7 +1648,7 @@ tmux set-option    -t "$SESSION" status-left-length 120
 # @yaamux-state on every status interval. The actual text after the refresh
 # is just the agent count + clock; the side-effect is the value.
 tmux set-option    -t "$SESSION" status-right \
-  "#(${SELF} --refresh-states >/dev/null 2>&1; echo)#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+Z zoom"
+  "#(${SELF} --refresh-states >/dev/null 2>&1; echo)#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+? help"
 tmux set-option    -t "$SESSION" window-status-current-style  "bg=colour27 fg=white bold"
 tmux set-option    -t "$SESSION" window-status-activity-style "bg=colour130 fg=white bold"
 tmux set-option    -t "$SESSION" pane-active-border-style "fg=colour46"
