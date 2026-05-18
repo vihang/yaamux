@@ -25,7 +25,7 @@
 #    yaamux --restart N | --restart-dead [-y] | --logs | --sync | --pr N [title] [--merge]
 #    yaamux --setup-notify | --ssh-config | --install-service
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
-#    yaamux --remote-hosts | --mobile-attach [<repo>] [<pane>] | --mobile-grid
+#    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
 #    yaamux --init | --install | --update | --uninstall | --add-docs | --version
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
@@ -1275,6 +1275,48 @@ case "${1:-}" in
 
   --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
 
+  --auto-attach)
+    # One snippet body that DTRT on phone, iPad, or desktop.  Detects the
+    # client terminal's width and routes to --mobile-attach (zoom one pane),
+    # --mobile-grid (multi-repo iPad grid), or a regular tmux attach.  Set
+    # YAAMUX_ATTACH_MODE=zoom|grid|full to override when auto guesses wrong
+    # (e.g. a narrow tmux pane on a desktop).
+    _aa_mode="${YAAMUX_ATTACH_MODE:-auto}"
+    if [[ "$_aa_mode" == "auto" ]]; then
+      _aa_cols=$(tput cols 2>/dev/null || echo 80)
+      if (( _aa_cols < 100 )); then _aa_mode=zoom
+      elif (( _aa_cols < 180 )); then _aa_mode=grid
+      else _aa_mode=full
+      fi
+    fi
+    case "$_aa_mode" in
+      zoom) exec "$SELF" --mobile-attach ;;
+      grid) exec "$SELF" --mobile-grid ;;
+      full)
+        # Prefer the current repo's session if we're inside one; otherwise the
+        # only running yaamux-, or a picker.
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+          exec tmux attach -t "$SESSION"
+        fi
+        mapfile -t _aa_list < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
+        case "${#_aa_list[@]}" in
+          0) die "No yaamux sessions running. Start one with: yaamux" ;;
+          1) exec tmux attach -t "${_aa_list[0]}" ;;
+          *)
+            echo "yaamux sessions:"
+            for _aa_i in "${!_aa_list[@]}"; do
+              printf "  %d) %s\n" "$((_aa_i+1))" "${_aa_list[$_aa_i]#yaamux-}"
+            done
+            read -rp "Pick [1]: " _aa_choice
+            _aa_choice="${_aa_choice:-1}"
+            case "$_aa_choice" in ''|*[!0-9]*) die "Invalid choice: ${_aa_choice}" ;; esac
+            (( _aa_choice >= 1 && _aa_choice <= ${#_aa_list[@]} )) || die "Out of range: ${_aa_choice}"
+            exec tmux attach -t "${_aa_list[$((_aa_choice-1))]}" ;;
+        esac ;;
+      *) die "Invalid YAAMUX_ATTACH_MODE: ${_aa_mode} (expected zoom|grid|full|auto)" ;;
+    esac ;;
+
+
   --mobile-attach)
     # iOS-friendly attach: ephemeral grouped session with one pane zoomed, so a
     # 4-agent grid is readable on a phone.  Designed to be the body of a Blink /
@@ -1526,10 +1568,10 @@ CONF
     _write_settings_json
     echo ""
     log "Done. In the ntfy app, subscribe to topic '${TOPIC}' on ${SERVER}"
-    log "Blink snippet '${BK}' (iOS-friendly, picks current session, zooms pane 0):"
-    log "  mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --mobile-attach"
+    log "Blink snippet '${BK}' (one snippet, auto picks UI from terminal width):"
+    log "  mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --auto-attach"
     log "ssh fallback (no mosh on remote):"
-    log "  ssh -t $(whoami)@${HOST_DISPLAY} 'yaamux --mobile-attach'"
+    log "  ssh -t $(whoami)@${HOST_DISPLAY} 'yaamux --auto-attach'"
     exit 0 ;;
 
   --help|-h)
@@ -1776,18 +1818,15 @@ for i in "${!AGENTS[@]}"; do
   echo -e "   $(agent_icon "${AGENT_TYPES[$i]}") ${AGENTS[$i]} → ${AGENT_TYPES[$i]}"
 done
 echo ""
-echo -e " ${CYAN}Remote:${NC}"
+echo -e " ${CYAN}Remote — one snippet, auto picks UI from terminal width:${NC}"
 if $MOSH_OK; then
-  echo -e "   ${BOLD}iPhone${NC} (1 pane zoomed — paste into Blink / Prompt 3 snippet):"
-  echo -e "     mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --mobile-attach"
-  echo -e "   ${BOLD}iPad${NC} (multi-repo grid, mouse on, swipe windows = swipe repos):"
-  echo -e "     mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --mobile-grid"
-  echo -e "   ${BOLD}Full grid${NC} (this repo only):"
-  echo -e "     mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- tmux attach -t ${SESSION}"
+  echo -e "   mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --auto-attach"
+  echo -e "   ${CYAN}auto thresholds:${NC} <100c → zoom (iPhone) · <180c → grid (iPad) · ≥180c → full (desktop)"
+  echo -e "   ${CYAN}force a mode:${NC} mosh ... -- env YAAMUX_ATTACH_MODE=zoom|grid|full yaamux --auto-attach"
+  echo -e "   ${CYAN}explicit flags:${NC} yaamux --mobile-attach · --mobile-grid · or 'tmux attach -t ${SESSION}'"
 else
-  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'yaamux --mobile-attach'        # iPhone"
-  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'yaamux --mobile-grid'          # iPad"
-  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'tmux attach -t ${SESSION}'     # full grid"
+  echo -e "   ssh -t $(whoami)@${HOST_DISPLAY} 'yaamux --auto-attach'"
+  echo -e "   ${CYAN}force a mode:${NC} ssh -t ... 'YAAMUX_ATTACH_MODE=zoom yaamux --auto-attach'"
 fi
 $HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
 echo ""

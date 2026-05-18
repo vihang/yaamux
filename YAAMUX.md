@@ -209,6 +209,43 @@ Then: `yaamux --remote work --list`, `yaamux --remote laptop --zoom 1`, etc.
 | **ntfy** | Push notifications (free) |
 | **Tailscale** | Zero-config networking (free) |
 
+### One snippet for every device (`--auto-attach`)
+
+`yaamux --auto-attach` reads the client terminal's width and routes to the
+right UI — so a single Blink Shell / Prompt 3 snippet works on iPhone, iPad,
+and desktop without thinking:
+
+| Terminal width | Routes to | Best for |
+|---|---|---|
+| `< 100` cols | `--mobile-attach` (1 pane zoomed) | iPhone |
+| `100–179` cols | `--mobile-grid` (multi-repo grid, mouse on) | iPad 11" / 13" |
+| `≥ 180` cols | regular `tmux attach` (full grid) | desktop / laptop |
+
+Recommended Blink / Prompt 3 snippet body — works from any iOS device:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --auto-attach
+```
+
+`yaamux --remote <host>` from a laptop keeps doing bare `tmux attach` → full
+desktop experience, so the two paths give you what you'd expect without
+mode-juggling.
+
+Override the auto-pick when needed:
+
+```bash
+# Force a mode at the call site
+mosh ... -- env YAAMUX_ATTACH_MODE=zoom yaamux --auto-attach
+ssh -t user@host 'YAAMUX_ATTACH_MODE=grid yaamux --auto-attach'
+
+# Valid: zoom | grid | full | auto (default)
+```
+
+If you prefer the picker behavior explicitly, the underlying flags
+(`--mobile-attach`, `--mobile-grid`, `tmux attach -t yaamux-<repo>`) all still
+work directly.
+
 ### iOS-friendly attach (`--mobile-attach`)
 
 A 4-pane tiled grid is unreadable on a phone. `yaamux --mobile-attach` spins up
