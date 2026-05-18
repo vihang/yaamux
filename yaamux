@@ -485,14 +485,16 @@ _exec_pane() {
 # exited". The shell set lives on @yaamux-shells (set at start-up from $SHELL
 # plus the common defaults) so the detector doesn't carry a hardcoded list.
 _pane_state() {
-  local idx="$1" raw dead cmd shells
+  # Optional 2nd arg lets callers in a loop pre-fetch @yaamux-shells once
+  # and pass it in, avoiding N extra tmux calls.
+  local idx="$1" shells="${2:-}" raw dead cmd s
   raw="$(tmux display-message -p -t "${SESSION}:agents.${idx}" \
         '#{pane_dead}|#{pane_current_command}' 2>/dev/null)" || { echo missing; return; }
   [[ -z "$raw" ]] && { echo missing; return; }
   dead="${raw%%|*}"; cmd="${raw#*|}"
   [[ "$dead" == "1" ]] && { echo dead; return; }
-  shells="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
-  local s
+  [[ -z "$shells" ]] && \
+    shells="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
   for s in $shells; do
     [[ "$cmd" == "$s" ]] && { echo idle; return; }
   done
@@ -538,11 +540,12 @@ _triage_prompt() {
   # Save and restore SESSION for the duration so _pane_state targets the
   # right session (it reads the global).
   local prev_session="${SESSION:-}"; SESSION="$session"
-  local cnt i state title issues=()
-  cnt="$(tmux list-panes -t "${session}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  local cnt i state title shells issues=()
+  cnt="$(tmux display-message -p -t "${session}:agents" '#{window_panes}' 2>/dev/null || echo 0)"
   if [[ -z "$cnt" || "$cnt" -eq 0 ]]; then SESSION="$prev_session"; return 0; fi
+  shells="$(tmux show-option -v -t "$session" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
   for ((i=0; i<cnt; i++)); do
-    state="$(_pane_state "$i")"
+    state="$(_pane_state "$i" "$shells")"
     [[ "$state" == "running" || "$state" == "missing" ]] && continue
     title="$(tmux display-message -p -t "${session}:agents.${i}" '#{pane_title}' 2>/dev/null)"
     issues+=("$i|$state|$title")
@@ -574,11 +577,12 @@ _triage_prompt() {
 # format). Driven by a tmux hook on pane-exited and by status-interval.
 _refresh_pane_states() {
   tmux has-session -t "$SESSION" 2>/dev/null || return 0
-  local cnt i state
-  cnt="$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  local cnt i state shells
+  cnt="$(tmux display-message -p -t "${SESSION}:agents" '#{window_panes}' 2>/dev/null || echo 0)"
   [[ -z "$cnt" || "$cnt" -eq 0 ]] && return 0
+  shells="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
   for ((i=0; i<cnt; i++)); do
-    state="$(_pane_state "$i")"
+    state="$(_pane_state "$i" "$shells")"
     [[ "$state" == "missing" ]] && continue
     tmux set-option -p -t "${SESSION}:agents.${i}" @yaamux-state "$state" 2>/dev/null || true
   done
@@ -1030,8 +1034,8 @@ tmux list-panes -t '${session}:agents' -F '#{pane_index}|#{pane_title}|#{pane_de
   case "${ans:-a}" in
     q|Q) return 1 ;;
     h|H)
-      local idxs=()
-      for rec in "${issues[@]}"; do idxs+=("${rec%%|*}"); done
+      # Bash array suffix-strip: produces ("0" "2" "3") from ("0|idle|t1" "2|dead|t2" "3|idle|t3")
+      local idxs=("${issues[@]%%|*}")
       log "Healing ${#idxs[@]} pane(s) on ${target}..." >&2
       # Run yaamux --restart-dead -y on the remote — needs yaamux installed
       # there. If absent, fall back to a single tmux respawn-pane per index.
@@ -1039,7 +1043,7 @@ tmux list-panes -t '${session}:agents' -F '#{pane_index}|#{pane_title}|#{pane_de
 if command -v yaamux >/dev/null 2>&1; then
   YAAMUX_NO_TRIAGE=1 yaamux --restart-dead -y
 else
-  for i in ${idxs[*]}; do
+  for i in ${idxs[@]}; do
     tmux respawn-pane -k -t '${session}:agents.'\"\$i\" 2>/dev/null || true
   done
   echo 'yaamux not installed on remote — respawned panes only; agents will not auto-relaunch.'
@@ -1290,9 +1294,10 @@ case "${1:-}" in
     header "panes"
     if tmux has-session -t "$SESSION" 2>/dev/null; then
       _refresh_pane_states
-      CNT=$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')
+      SHELLS="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
+      CNT=$(tmux display-message -p -t "${SESSION}:agents" '#{window_panes}' 2>/dev/null || echo 0)
       for ((i=0; i<CNT; i++)); do
-        STATE=$(_pane_state "$i")
+        STATE=$(_pane_state "$i" "$SHELLS")
         TITLE=$(tmux display-message -p -t "${SESSION}:agents.${i}" '#{pane_title}' 2>/dev/null)
         printf "  pane #%d: %s  state=%s\n" "$i" "$TITLE" "$STATE"
       done
@@ -1359,10 +1364,11 @@ case "${1:-}" in
     YES=false; [[ "${2:-}" == "-y" ]] && YES=true
     tmux has-session -t "$SESSION" 2>/dev/null || { log "No session for ${PROJECT_NAME}."; exit 0; }
     _refresh_pane_states
-    CNT=$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')
+    SHELLS="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
+    CNT=$(tmux display-message -p -t "${SESSION}:agents" '#{window_panes}' 2>/dev/null || echo 0)
     TARGETS=()
     for ((i=0; i<CNT; i++)); do
-      [[ "$(_pane_state "$i")" != "running" ]] && TARGETS+=("$i")
+      [[ "$(_pane_state "$i" "$SHELLS")" != "running" ]] && TARGETS+=("$i")
     done
     if [[ ${#TARGETS[@]} -eq 0 ]]; then
       log "All ${CNT} panes running — nothing to restart."
