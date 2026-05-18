@@ -194,6 +194,30 @@ teardown() {
   [[ "$output" == *"1-based"* ]]
 }
 
+@test "--remote rejects targets starting with '-' (option injection)" {
+  run_yaamux --remote -X-injected --list
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"starts with"* || "$output" == *"-X-injected"* ]]
+}
+
+@test "--remote transport flags can appear anywhere in arg list" {
+  # --mosh / --ssh must be stripped from the arg list before the sub-command
+  # is interpreted, regardless of position.  We verify by checking that an
+  # unknown sub-flag is still recognized (proving --mosh wasn't itself
+  # treated as the sub-command).
+  run_yaamux --remote --mosh some-host --bogus-flag
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+
+  run_yaamux --remote some-host --bogus-flag --mosh
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+
+  run_yaamux --remote some-host --ssh --bogus-flag
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+}
+
 @test "_remote_resolve_host: last line without trailing newline is honored" {
   HOME_TMP="$(mktemp -d)"
   mkdir -p "$HOME_TMP/.config/yaamux"

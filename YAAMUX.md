@@ -135,8 +135,8 @@ mosh survives sleep, network drops, and LTE↔WiFi handoffs — ideal for phones
 
 If yaamux is installed on your laptop **and** the agents run on another box,
 `--remote` wraps the SSH+tmux dance and adds a session picker, status, and
-per-pane zoom. Only `tmux` is needed on the remote — yaamux itself does not
-have to be installed there.
+per-pane zoom. The remote needs `tmux` (and `mosh-server` + `sh` if you pass
+`--mosh`); yaamux itself does not have to be installed there.
 
 ```bash
 yaamux --remote user@host                     # pick a session interactively & attach
@@ -154,6 +154,8 @@ yaamux --remote-hosts                         # show host aliases configured loc
 If multiple sessions are running, `--remote <host>` shows a numbered table and
 prompts; on a single session it auto-attaches. `--mosh` may appear anywhere in
 the arg list (or set `YAAMUX_MOSH=1` in your shell rc to make mosh the default).
+Transport flags only affect attach/zoom — `--list` and `--status` are one-shot
+queries and always run over ssh.
 
 #### Host aliases
 
