@@ -1,7 +1,7 @@
 # Homebrew formula for yaamux.
 #
-# Source of truth: this file. The Release workflow auto-bumps a copy of it
-# into vihang/homebrew-tap on every `v*` tag, substituting the tagged URL
+# Source of truth: vihang/yaamux Formula/yaamux.rb. Auto-bumped into
+# vihang/homebrew-tap on every `v*` tag, substituting the tagged URL
 # and tarball SHA256.
 #
 # Test locally before tagging:

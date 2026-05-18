@@ -133,7 +133,10 @@ jobs:
           # Merge the PR. Use --auto only when auto-merge is actually enabled
           # on the repo (so a transient `gh pr merge --auto` failure can't
           # silently fall back to a protection-bypassing immediate merge).
-          auto_allowed="$(gh repo view --json autoMergeAllowed --jq .autoMergeAllowed)"
+          # `gh repo view --json autoMergeAllowed` is unsupported; the REST
+          # `repos/{owner}/{repo}` payload exposes the same flag as
+          # `allow_auto_merge`.
+          auto_allowed="$(gh api repos/vihang/homebrew-tap --jq .allow_auto_merge)"
           if [ "$auto_allowed" = "true" ]; then
             gh pr merge "$branch" --squash --delete-branch --auto
           else
