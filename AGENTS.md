@@ -122,6 +122,7 @@ The `yaamux` file is ordered top-to-bottom as:
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` |
 | Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` |
+| Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
 | Flag `case` | All `--xxx` commands; each `exit 0`s |
 | Start sequence | preflight → hooks → worktrees → tmux build → launch → attach |
@@ -165,7 +166,9 @@ Shipped in v0.1 (see `tests/yaamux.bats` + CHANGELOG section in YAAMUX.md):
 `--init` · `--list` · `--exec` · `--pr` · `--layout` · `--version` · `--yolo`
 · `--link-env` · `--clean` staleness-aware · `.yaamux/config` defaults
 · AGENTS.md scaffolding · smart-default layout · status-line polish ·
-bats suite · GitHub Actions CI · Homebrew tap.
+bats suite · GitHub Actions CI · Homebrew tap · `--remote <host>` /
+`--remote-hosts` (cross-machine session access via SSH/mosh, with picker,
+saved aliases at `~/.config/yaamux/hosts.conf`, and per-pane zoom).
 
 Deferred to v0.2+ (see `/Users/vihang/.claude/plans/cached-sleeping-jellyfish.md`
 Roadmap section R1–R12): controller mode · council/pipeline/vote/pair

@@ -79,6 +79,8 @@ multiple repos simultaneously without collision.
 | `--setup-notify` | Configure ntfy push + Blink Shell deep links |
 | `--ssh-config` | (Re)generate the `~/.ssh/config` host block |
 | `--install-service` | macOS LaunchAgent — auto-start this repo's agents on login |
+| `--remote <host> [args]` | Drive a remote host's yaamux sessions — see below |
+| `--remote-hosts` | List host aliases from `~/.config/yaamux/hosts.conf` |
 | `--help` / `--version` | Inline help / version + install source |
 
 The `--yolo` and `--link-env` modifiers combine with positional args
@@ -128,6 +130,44 @@ ssh  user@host -t 'tmux attach -t yaamux-<repo>'    # fallback
 
 `yaamux --ssh-config` writes a `Host yaamux` block to `~/.ssh/config`.
 mosh survives sleep, network drops, and LTE↔WiFi handoffs — ideal for phones.
+
+### Drive remote sessions with `--remote`
+
+If yaamux is installed on your laptop **and** the agents run on another box,
+`--remote` wraps the SSH+tmux dance and adds a session picker, status, and
+per-pane zoom. Only `tmux` is needed on the remote — yaamux itself does not
+have to be installed there.
+
+```bash
+yaamux --remote user@host                     # pick a session interactively & attach
+yaamux --remote user@host myapp               # direct attach to yaamux-myapp
+yaamux --remote user@host --list              # what's running (table)
+yaamux --remote user@host --list --json       # ...same, JSON
+yaamux --remote user@host --status            # windows / panes — no attach
+yaamux --remote user@host --status myapp      # ...for one specific session
+yaamux --remote user@host --zoom 2            # attach with pane 2 zoomed (phone-friendly)
+yaamux --remote user@host --zoom 2 myapp      # ...for a specific session
+yaamux --remote user@host --mosh              # use mosh transport (sleep-safe)
+yaamux --remote-hosts                         # show host aliases configured locally
+```
+
+If multiple sessions are running, `--remote <host>` shows a numbered table and
+prompts; on a single session it auto-attaches. `--mosh` may appear anywhere in
+the arg list (or set `YAAMUX_MOSH=1` in your shell rc to make mosh the default).
+
+#### Host aliases
+
+Save shortcuts in `~/.config/yaamux/hosts.conf` — one per line, whitespace-separated:
+
+```
+# yaamux remote host aliases
+work    vihang@work.tail-scale.net
+laptop  vihang@laptop.local
+phone   user@my-phone-ssh-host
+```
+
+Then: `yaamux --remote work --list`, `yaamux --remote laptop --zoom 1`, etc.
+`yaamux --remote-hosts` prints the table with the file path.
 
 ### iPhone / iPad apps
 
