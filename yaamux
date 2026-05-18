@@ -138,17 +138,23 @@ agent_idle_pattern() {
   esac
 }
 
-# ── Git host helpers ──────────────────────────────────────────────────────────
+# ── Forge helpers (pluggable git host) ────────────────────────────────────────
 # Mirrors the agent_* triad: one switch per provider per op. Every call into a
-# host CLI (gh, glab, …) goes through this family — never inline `gh`/`glab`
-# elsewhere. Adding GitLab later = filling in the `gitlab)` cases here.
-# Override auto-detection with $YAAMUX_GIT_HOST.
+# forge CLI (gh, glab, tea, …) goes through this family — never inline
+# `gh`/`glab`/`tea` elsewhere. Adding a forge later = filling in its case in
+# each helper. Override auto-detection with $YAAMUX_FORGE.
+#
+# Phase 1 support (implementation of #25 Phase 1):
+#   - github (gh):   full — all ops working
+#   - gitlab (glab): create + merge working; view/watch/ci-status TODO
+#   - gitea  (tea):  create working; rest TODO
+#   - other:         all dispatch arms die with a helpful message
 
 # Extract the hostname from a git remote URL. Handles https://, ssh://, and
 # the bare `user@host:path` SSH form. Returns empty on unrecognized input.
 # We match on the hostname (not the whole URL) so a github.com repo named
 # something like "gitea-foo" doesn't get mis-detected as a Gitea forge.
-_host_url_hostname() {
+forge_url_hostname() {
   local url="$1" rest
   case "$url" in
     http://*|https://*|ssh://*)
@@ -165,11 +171,11 @@ _host_url_hostname() {
   esac
 }
 
-_host_provider() {
-  [[ -n "${YAAMUX_GIT_HOST:-}" ]] && { echo "$YAAMUX_GIT_HOST"; return; }
+forge_provider() {
+  [[ -n "${YAAMUX_FORGE:-}" ]] && { echo "$YAAMUX_FORGE"; return; }
   local url host
   url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-  host="$(_host_url_hostname "$url")"
+  host="$(forge_url_hostname "$url")"
   case "$host" in
     github.com|*.github.com)                       echo github ;;
     gitlab.com|*.gitlab.com|gitlab.*)              echo gitlab ;;
@@ -177,60 +183,87 @@ _host_provider() {
     *)                                             echo other  ;;
   esac
 }
-_host_cli() {
-  case "$(_host_provider)" in
+forge_bin() {
+  case "$(forge_provider)" in
     github) echo gh   ;;
     gitlab) echo glab ;;
+    gitea)  echo tea  ;;
     *)      echo ""   ;;
   esac
 }
-# PR create — $1=wt $2=base $3=branch $4=title(opt). Echoes PR URL on success.
+# Human-readable label for help text / errors.
+forge_label() {
+  case "$(forge_provider)" in
+    github) echo "GitHub" ;;
+    gitlab) echo "GitLab" ;;
+    gitea)  echo "Gitea"  ;;
+    *)      forge_provider ;;
+  esac
+}
+# PR create — $1=wt $2=base $3=head $4=title(opt). Echoes PR URL on success.
 # We `cd` into the worktree before invoking the forge CLI so `gh`/`glab`/`tea`
 # can resolve the repo context unambiguously — `--fill` reads commit messages
 # from the current branch in cwd, so without the cd it would auto-fill from
 # the wrong repo when yaamux is run from anywhere outside the worktree.
-_host_pr_create() {
+# Each forge keeps its native flag spelling (target-branch/source-branch for
+# glab; base/head for tea) — the wrapper routes; it doesn't normalize CLI
+# vocabulary across forges.
+forge_create_pr() {
   local wt="$1" base="$2" head="$3" title="${4:-}" args
-  case "$(_host_provider)" in
+  case "$(forge_provider)" in
     github)
       args=(--fill --base "$base" --head "$head")
       [[ -n "$title" ]] && args+=(--title "$title")
       ( cd "$wt" && gh pr create "${args[@]}" ) ;;
-    *) die "PR create not implemented for $(_host_provider). Set YAAMUX_GIT_HOST or open the PR manually." ;;
+    gitlab)
+      args=(--fill --target-branch "$base" --source-branch "$head")
+      [[ -n "$title" ]] && args+=(--title "$title")
+      ( cd "$wt" && glab mr create "${args[@]}" ) ;;
+    gitea)
+      args=(--base "$base" --head "$head")
+      [[ -n "$title" ]] && args+=(--title "$title")
+      ( cd "$wt" && tea pr create "${args[@]}" ) ;;
+    *) die "PR create not implemented for $(forge_provider). Set YAAMUX_FORGE=github|gitlab|gitea, or open the PR manually." ;;
   esac
 }
 # PR lookup — $1=wt → echoes PR URL for the worktree's current branch.
-_host_pr_url() {
-  # $1=wt. Branch is passed positionally to `gh pr view` so it isn't inferred
-  # from caller CWD — yaamux runs from anywhere, not the worktree. Branch
-  # resolution lives inside the github arm so non-github providers still hit
-  # "not implemented" cleanly (they don't need the branch at all).
-  case "$(_host_provider)" in
+# Branch resolution lives inside the github arm so non-github providers still
+# hit "not implemented" cleanly without needing the branch.
+forge_view_pr() {
+  case "$(forge_provider)" in
     github)
       local branch
       branch="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
         || die "Could not resolve current branch in $1."
       [[ -n "$branch" ]] || die "Could not resolve current branch in $1."
       gh -R "$(git -C "$1" remote get-url origin)" pr view "$branch" --json url -q .url ;;
-    *)      die "PR lookup not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_view_pr for gitlab not implemented yet — Phase 1 follow-up (see #25)." ;;
+    gitea)  die "forge_view_pr for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR lookup not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_checks_watch() {
-  case "$(_host_provider)" in
+forge_pr_checks_watch() {
+  case "$(forge_provider)" in
     github) gh pr checks --watch "$1" ;;
-    *)      die "PR checks --watch not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_pr_checks_watch for gitlab not implemented yet — Phase 1 follow-up (see #25). Try: glab ci status --live --branch <branch>" ;;
+    gitea)  die "forge_pr_checks_watch for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR checks --watch not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_merge_auto() {
-  case "$(_host_provider)" in
-    github) gh pr merge --squash --auto "$1" ;;
-    *)      die "PR auto-merge not implemented for $(_host_provider)." ;;
+forge_merge_pr() {
+  case "$(forge_provider)" in
+    github) gh   pr merge --squash --auto       "$1" ;;
+    gitlab) glab mr merge --squash --auto-merge "$1" ;;
+    gitea)  die "forge_merge_pr for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR auto-merge not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_ci_status() {
-  case "$(_host_provider)" in
+forge_pr_ci_status() {
+  case "$(forge_provider)" in
     github) gh pr checks "$1" ;;
-    *)      die "PR CI status not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_pr_ci_status for gitlab not implemented yet — Phase 1 follow-up (see #25). Try: glab ci status --branch <branch>" ;;
+    gitea)  die "forge_pr_ci_status for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR CI status not implemented for $(forge_provider)." ;;
   esac
 }
 
@@ -1466,8 +1499,8 @@ _pr_pane() {
   local agent="agent-$((idx+1))"
   local branch="worktree/${agent}"
   local wt="${WORKTREES_BASE}/${agent}"
-  local cli; cli="$(_host_cli)"
-  [[ -n "$cli" ]] || die "No git host CLI configured (provider: $(_host_provider))."
+  local cli; cli="$(forge_bin)"
+  [[ -n "$cli" ]] || die "No forge CLI configured (forge: $(forge_provider)). Set YAAMUX_FORGE=github|gitlab|gitea."
   command -v "$cli" &>/dev/null || die "${cli} not found — brew install ${cli}; ${cli} auth login"
   [[ -d "$wt" ]] || die "Worktree $wt not found."
   local base="${YAAMUX_DEFAULT_BASE:-origin/main}"; base="${base#origin/}"
@@ -1475,11 +1508,11 @@ _pr_pane() {
   git -C "$wt" push -u origin "$branch" || die "git push failed."
   log "Creating PR (base: ${base})..."
   local pr_url
-  pr_url="$(_host_pr_create "$wt" "$base" "$branch" "$title")" || die "PR create failed."
+  pr_url="$(forge_create_pr "$wt" "$base" "$branch" "$title")" || die "PR create failed."
   echo "$pr_url"
   if [[ "$merge" == "true" ]]; then
     log "Enabling auto-merge (squash)..."
-    _host_pr_merge_auto "$pr_url" || die "auto-merge failed."
+    forge_merge_pr "$pr_url" || die "auto-merge failed."
     log "Auto-merge enabled. Run 'yaamux --clean' after merge completes to remove the worktree."
   fi
 }
@@ -1487,7 +1520,7 @@ _pr_pane() {
 # Resolve a 0-based agent ordinal to "wt|branch|pr_url". Does NOT consult tmux —
 # the disk-based agent-N convention is independent of where any tmux pane sits
 # (same rationale as --pr's comment above).
-# stderr from _host_pr_url is intentionally NOT suppressed so the underlying
+# stderr from forge_view_pr is intentionally NOT suppressed so the underlying
 # error (e.g. "PR lookup not implemented for gitlab" or gh's "no pull requests
 # found for branch …") reaches the user; we just add the follow-up hint.
 _pane_pr() {
@@ -1495,13 +1528,13 @@ _pane_pr() {
   wt="${WORKTREES_BASE}/agent-$((idx+1))"
   branch="worktree/agent-$((idx+1))"
   [[ -d "$wt" ]] || die "Worktree $wt not found."
-  url="$(_host_pr_url "$wt")" \
+  url="$(forge_view_pr "$wt")" \
     || die "No PR for ${branch} (open one with: yaamux --pr $((idx+1)))"
   echo "${wt}|${branch}|${url}"
 }
-_watch_pr_pane()   { local r; r="$(_pane_pr "$1")"; _host_pr_checks_watch "${r##*|}"; }
-_auto_merge_pane() { local r; r="$(_pane_pr "$1")"; _host_pr_merge_auto   "${r##*|}"; }
-_ci_status_pane()  { local r; r="$(_pane_pr "$1")"; _host_pr_ci_status    "${r##*|}"; }
+_watch_pr_pane()   { local r; r="$(_pane_pr "$1")"; forge_pr_checks_watch "${r##*|}"; }
+_auto_merge_pane() { local r; r="$(_pane_pr "$1")"; forge_merge_pr   "${r##*|}"; }
+_ci_status_pane()  { local r; r="$(_pane_pr "$1")"; forge_pr_ci_status    "${r##*|}"; }
 
 # Diff vs origin/main for agent N's worktree. Pipes through delta if installed
 # (forces color so delta lights up); else falls back to git's own pager.
@@ -3336,11 +3369,18 @@ fi
 MOSH_OK=false
 command -v mosh &>/dev/null && MOSH_OK=true || warn "mosh not found — brew install mosh"
 # New-stack soft deps: warn but don't die. lazygit drives the `git` window;
-# gh backs the PR/CI flags; delta/bat polish diffs and file viewing in panes.
+# the forge CLI (gh / glab / tea — picked by forge_bin from the auto-detected
+# or YAAMUX_FORGE-overridden provider) backs the PR/CI flags; delta/bat polish
+# diffs and file viewing in panes.
 command -v lazygit &>/dev/null || warn "lazygit not found — \`git\` window will be skipped. (brew install lazygit)"
-command -v gh      &>/dev/null || warn "gh not found — --pr/--watch-pr/--auto-merge/--ci-status will fail. (brew install gh && gh auth login)"
-command -v delta   &>/dev/null || warn "git-delta not found — diffs will render plain. (brew install git-delta)"
-command -v bat     &>/dev/null || warn "bat not found — files will page through less. (brew install bat)"
+_forge_cli="$(forge_bin 2>/dev/null)"
+if [[ -n "${_forge_cli:-}" ]]; then
+  command -v "$_forge_cli" &>/dev/null || \
+    warn "${_forge_cli} not found — --pr/--watch-pr/--auto-merge/--ci-status will fail for $(forge_label). (brew install ${_forge_cli} && ${_forge_cli} auth login)"
+fi
+unset _forge_cli
+command -v delta &>/dev/null || warn "git-delta not found — diffs will render plain. (brew install git-delta)"
+command -v bat   &>/dev/null || warn "bat not found — files will page through less. (brew install bat)"
 # If mosh is installed but mosh-server isn't on ssh's non-interactive PATH,
 # iOS clients opening the QR'd `mosh://user@host` URL will hit NoMoshServerArgs.
 # This is the v0.1.8 trade-off: the URL scheme can't carry the --server= PATH

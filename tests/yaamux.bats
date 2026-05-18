@@ -794,91 +794,107 @@ PY
   grep -qxF ".yaamux/panels/" .gitignore
 }
 
-# ── Git-host abstraction (_host_provider / _host_cli) ─────────────────────────
+# ── Forge abstraction (forge_provider / forge_bin / forge_label) ──────────────
 
-# Helper: source the host-helper trio so each test can eval them once.
-# Keep in sync if a new helper joins the _host_* family.
-_host_helpers_body() {
-  awk '/^_host_url_hostname\(\) \{/,/^}/' "$YAAMUX_BIN"
+# Helper: source the forge trio so each test can eval them once. Keep in sync
+# if a new helper joins the forge_* family.
+_forge_helpers_body() {
+  awk '/^forge_url_hostname\(\) \{/,/^}/' "$YAAMUX_BIN"
   printf '\n'
-  awk '/^_host_provider\(\) \{/,/^}/'     "$YAAMUX_BIN"
+  awk '/^forge_provider\(\) \{/,/^}/'     "$YAAMUX_BIN"
   printf '\n'
-  awk '/^_host_cli\(\) \{/,/^}/'          "$YAAMUX_BIN"
+  awk '/^forge_bin\(\) \{/,/^}/'          "$YAAMUX_BIN"
+  printf '\n'
+  awk '/^forge_label\(\) \{/,/^}/'        "$YAAMUX_BIN"
 }
 
-@test "_host_provider: explicit YAAMUX_GIT_HOST overrides auto-detection" {
-  eval "$(_host_helpers_body)"
+@test "forge_provider: explicit YAAMUX_FORGE overrides auto-detection" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  YAAMUX_GIT_HOST=gitlab; [ "$(_host_provider)" = "gitlab" ]
-  YAAMUX_GIT_HOST=github; [ "$(_host_provider)" = "github" ]
-  YAAMUX_GIT_HOST=other ; [ "$(_host_provider)" = "other"  ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_provider)" = "gitlab" ]
+  YAAMUX_FORGE=github; [ "$(forge_provider)" = "github" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_provider)" = "gitea"  ]
+  YAAMUX_FORGE=other ; [ "$(forge_provider)" = "other"  ]
 }
 
-@test "_host_provider: auto-detects github / gitlab / other from origin URL" {
-  eval "$(_host_helpers_body)"
+@test "forge_provider: auto-detects github, gitlab, gitea, codeberg, other" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  unset YAAMUX_GIT_HOST
+  unset YAAMUX_FORGE
   git -C "$TEST_REPO" remote add origin https://github.com/foo/bar.git
-  [ "$(_host_provider)" = "github" ]
+  [ "$(forge_provider)" = "github" ]
   git -C "$TEST_REPO" remote set-url origin git@gitlab.com:foo/bar.git
-  [ "$(_host_provider)" = "gitlab" ]
+  [ "$(forge_provider)" = "gitlab" ]
+  git -C "$TEST_REPO" remote set-url origin https://codeberg.org/foo/bar.git
+  [ "$(forge_provider)" = "gitea" ]
+  git -C "$TEST_REPO" remote set-url origin https://gitea.example.com/foo/bar.git
+  [ "$(forge_provider)" = "gitea" ]
   git -C "$TEST_REPO" remote set-url origin https://bitbucket.org/foo/bar.git
-  [ "$(_host_provider)" = "other" ]
+  [ "$(forge_provider)" = "other" ]
 }
 
 # Drift-guard: the tightened hostname-only matcher must NOT mis-detect a
-# repo whose path contains a forge name (e.g., github.com/foo/gitlab-mirror).
-@test "_host_provider: does not mis-detect forge from path segments" {
-  eval "$(_host_helpers_body)"
+# repo whose path contains a forge name (e.g., github.com/foo/gitea-mirror).
+@test "forge_provider: does not mis-detect forge from path segments" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  unset YAAMUX_GIT_HOST
+  unset YAAMUX_FORGE
   git -C "$TEST_REPO" remote add origin https://github.com/foo/gitea-mirror.git
-  [ "$(_host_provider)" = "github" ]
+  [ "$(forge_provider)" = "github" ]
   git -C "$TEST_REPO" remote set-url origin https://github.com/foo/gitlab-tools.git
-  [ "$(_host_provider)" = "github" ]
+  [ "$(forge_provider)" = "github" ]
 }
 
 # Drift-guard: every supported URL form must strip user@ and :port before
 # matching, so `ssh://git@github.com/foo/bar.git` and the SCP-style
 # `git@github.com:foo/bar.git` resolve to identical hosts (and identical
 # providers). Same for HTTPS basic-auth URLs.
-@test "_host_url_hostname: strips user@ and :port across schemes" {
-  eval "$(_host_helpers_body)"
+@test "forge_url_hostname: strips user@ and :port across schemes" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  unset YAAMUX_GIT_HOST
+  unset YAAMUX_FORGE
   # SCP-style — already known to work
-  [ "$(_host_url_hostname 'git@github.com:foo/bar.git')" = "github.com" ]
+  [ "$(forge_url_hostname 'git@github.com:foo/bar.git')" = "github.com" ]
   # ssh:// with userinfo
-  [ "$(_host_url_hostname 'ssh://git@github.com/foo/bar.git')" = "github.com" ]
+  [ "$(forge_url_hostname 'ssh://git@github.com/foo/bar.git')" = "github.com" ]
   # ssh:// with userinfo + port
-  [ "$(_host_url_hostname 'ssh://git@github.com:22/foo/bar.git')" = "github.com" ]
+  [ "$(forge_url_hostname 'ssh://git@github.com:22/foo/bar.git')" = "github.com" ]
   # https:// with basic auth
-  [ "$(_host_url_hostname 'https://user:pass@gitlab.example.com/foo/bar.git')" = "gitlab.example.com" ]
+  [ "$(forge_url_hostname 'https://user:pass@gitlab.example.com/foo/bar.git')" = "gitlab.example.com" ]
   # Plain https://
-  [ "$(_host_url_hostname 'https://github.com/foo/bar.git')" = "github.com" ]
+  [ "$(forge_url_hostname 'https://github.com/foo/bar.git')" = "github.com" ]
   # Empty / unrecognized
-  [ "$(_host_url_hostname '')" = "" ]
-  [ "$(_host_url_hostname 'not-a-url')" = "" ]
+  [ "$(forge_url_hostname '')" = "" ]
+  [ "$(forge_url_hostname 'not-a-url')" = "" ]
 }
 
-# End-to-end via _host_provider: ssh:// with userinfo must route correctly
+# End-to-end via forge_provider: ssh:// with userinfo must route correctly
 # (was the original bug — `ssh://git@github.com/...` was hitting `other`).
-@test "_host_provider: ssh:// with user@ routes to the right forge" {
-  eval "$(_host_helpers_body)"
+@test "forge_provider: ssh:// with user@ routes to the right forge" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  unset YAAMUX_GIT_HOST
+  unset YAAMUX_FORGE
   git -C "$TEST_REPO" remote add origin ssh://git@github.com/foo/bar.git
-  [ "$(_host_provider)" = "github" ]
+  [ "$(forge_provider)" = "github" ]
   git -C "$TEST_REPO" remote set-url origin ssh://git@gitlab.com:22/foo/bar.git
-  [ "$(_host_provider)" = "gitlab" ]
+  [ "$(forge_provider)" = "gitlab" ]
 }
 
-@test "_host_cli: maps provider to gh / glab / empty" {
-  eval "$(_host_helpers_body)"
+@test "forge_bin: maps provider to gh / glab / tea / empty" {
+  eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
-  YAAMUX_GIT_HOST=github; [ "$(_host_cli)" = "gh"   ]
-  YAAMUX_GIT_HOST=gitlab; [ "$(_host_cli)" = "glab" ]
-  YAAMUX_GIT_HOST=other ; [ "$(_host_cli)" = ""     ]
+  YAAMUX_FORGE=github; [ "$(forge_bin)" = "gh"   ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_bin)" = "glab" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_bin)" = "tea"  ]
+  YAAMUX_FORGE=other ; [ "$(forge_bin)" = ""     ]
+}
+
+@test "forge_label: human-readable names" {
+  eval "$(_forge_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_FORGE=github; [ "$(forge_label)" = "GitHub" ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_label)" = "GitLab" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_label)" = "Gitea"  ]
 }
 
 # ── New PR/CI/diff flags — usage validation ───────────────────────────────────
@@ -920,14 +936,14 @@ _host_helpers_body() {
   [[ "$output" == *"not found"* ]]
 }
 
-# Pluggability proof: YAAMUX_GIT_HOST=gitlab routes into the gitlab) case in
-# every _host_pr_* helper. Currently those cases die with "not implemented";
+# Pluggability proof: YAAMUX_FORGE=gitlab routes into the gitlab) case in
+# every forge_pr_* helper. Currently those cases die with "not implemented";
 # a future change that wires up `glab` should update this test to assert
 # success instead of the placeholder message.
-@test "YAAMUX_GIT_HOST=gitlab routes PR ops into the gitlab) dispatch" {
+@test "YAAMUX_FORGE=gitlab routes PR ops into the gitlab) dispatch" {
   wt_base="$(dirname "$TEST_REPO")/$(basename "$TEST_REPO")-worktrees"
   mkdir -p "${wt_base}/agent-1"
-  YAAMUX_GIT_HOST=gitlab run_yaamux --watch-pr 1
+  YAAMUX_FORGE=gitlab run_yaamux --watch-pr 1
   [ "$status" -ne 0 ]
   [[ "$output" == *"not implemented"* ]]
   rm -rf "$wt_base"

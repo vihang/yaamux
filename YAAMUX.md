@@ -70,7 +70,7 @@ multiple repos simultaneously without collision.
 | `--send N "x"` | Inject a prompt into pane N without attaching |
 | `--exec N "x" [timeout]` | Headless: send, poll for idle, return output (5min default) |
 | `--broadcast "x"` | Send the same prompt to every pane |
-| `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
+| `--pr N [title] [--merge]` | Push pane N's branch + open PR via the configured forge (`gh` / `glab` / `tea` — see `YAAMUX_FORGE` and the "Pluggable forge" section below) |
 | `--watch-pr N` | Watch CI for pane N's PR — blocks until pass / fail |
 | `--auto-merge N` | Enable auto-merge (squash) on pane N's existing PR |
 | `--ci-status [N]` | CI status table — one pane, or every pane that has a PR |
@@ -532,13 +532,15 @@ The config directory is gitignored by `yaamux --init`.
 
 ### Git-host operations from the CLI
 
-Four new flags wrap `gh` for common per-pane git-host operations. Each takes
-a 1-based agent number — they look up `agent-N` on disk (same convention as
-`--pr`), so they're independent of where any tmux pane sits.
+Four new flags wrap the **configured forge CLI** for common per-pane git-host
+operations. The CLI is whichever forge is selected by `forge_bin` (`gh` for
+github, `glab` for gitlab, `tea` for gitea — see "Pluggable forge" below).
+Each flag takes a 1-based agent number; they look up `agent-N` on disk (same
+convention as `--pr`), so they're independent of where any tmux pane sits.
 
 ```bash
-yaamux --watch-pr 2      # gh pr checks --watch — blocks until CI completes
-yaamux --auto-merge 2    # gh pr merge --squash --auto on the existing PR
+yaamux --watch-pr 2      # forge_pr_checks_watch — blocks until CI completes
+yaamux --auto-merge 2    # forge_merge_pr on the existing PR
 yaamux --ci-status       # table of CI checks for every pane that has a PR
 yaamux --ci-status 2     # CI checks for just pane 2's PR
 yaamux --diff 2          # git diff origin/main...HEAD piped through delta
@@ -548,20 +550,43 @@ Diffs are also auto-piped through `delta` from any shell inside the session
 (yaamux sets `GIT_PAGER=delta` and `PAGER=bat` as session env vars when those
 binaries are installed — no global gitconfig changes).
 
-### Pluggable git host
+### Pluggable forge
 
 All four flags + `--pr` route through a small dispatch family
-(`_host_provider` / `_host_cli` / `_host_pr_*`) instead of inlining `gh`.
-Adding GitLab later means filling in the `gitlab)` case in each helper —
-no other call site touches the host CLI directly. The provider is auto-
-detected from `git remote get-url origin`; override with `YAAMUX_GIT_HOST`:
+(`forge_provider` / `forge_bin` / `forge_label` / `forge_create_pr` /
+`forge_view_pr` / `forge_pr_checks_watch` / `forge_merge_pr` /
+`forge_pr_ci_status`) instead of inlining `gh`. Adding a new forge =
+filling in its case in each helper — no other call site touches a forge
+CLI directly. The forge is auto-detected from `git remote get-url origin`;
+override with `YAAMUX_FORGE`.
+
+Detection is hostname-only (parsed by `forge_url_hostname` from the remote URL,
+ignoring path segments) so a github.com repo named `gitea-mirror` doesn't
+mis-route to `tea`. The patterns below are matched against the hostname:
+
+| Forge  | CLI    | Hostname patterns                                            | `--pr` create / merge | `--watch-pr` / `--ci-status` / `--auto-merge` (separate flag) |
+|--------|--------|--------------------------------------------------------------|-----------------------|----------------------------------------------------------------|
+| github | `gh`   | `github.com` · `*.github.com`                                | ✓ working             | ✓ working                                                       |
+| gitlab | `glab` | `gitlab.com` · `*.gitlab.com` · `gitlab.*`                   | ✓ working             | ✗ TODO (Phase 1 follow-up)                                      |
+| gitea  | `tea`  | `codeberg.org` · `gitea.com` · `*.codeberg.org` · `gitea.*`  | partial (create only) | ✗ TODO (Phase 1 follow-up)                                      |
+| other  | —      | fallback                                                     | ✗ unsupported         | ✗ unsupported                                                   |
 
 ```bash
-YAAMUX_GIT_HOST=gitlab yaamux --watch-pr 1
-# → dies with "PR checks --watch not implemented for gitlab."  (placeholder)
+# Auto-detected (origin is a github.com URL → uses gh)
+yaamux --pr 2
+
+# Forced — useful for self-hosted GitLab / Gitea, or to test dispatch
+YAAMUX_FORGE=gitlab yaamux --pr 2          # uses glab mr create
+YAAMUX_FORGE=gitea  yaamux --pr 2          # uses tea pr create
+YAAMUX_FORGE=gitlab yaamux --watch-pr 1
+# → dies with "forge_pr_checks_watch for gitlab not implemented yet —
+#   Phase 1 follow-up (see #25)."
 ```
 
-This is the follow-up flagged in #25 ("pluggable provider architecture").
+Implementation tracked in [#25](https://github.com/vihang/yaamux/issues/25)
+("Pluggable provider architecture"). Phase 1 (this) lands the forge
+dispatch + working `glab` create/merge + working `tea` create. Remaining
+ops + notifier/multiplexer abstractions are subsequent phases.
 
 ---
 
