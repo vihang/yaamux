@@ -17,7 +17,6 @@ One bash file · one tmux session per repo · zero ceremony.
 [![CI](https://github.com/vihang/yaamux/actions/workflows/ci.yml/badge.svg)](https://github.com/vihang/yaamux/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Single file](https://img.shields.io/badge/single--file-bash-89e051.svg)](./yaamux)
-[![Version](https://img.shields.io/badge/version-v0.4.0-7c3aed.svg)](./VERSION)
 
 🤖 Claude Code · ✦ Gemini CLI · 🐙 GitHub Copilot CLI · ⬡ Codex CLI · ◉ opencode
 
@@ -25,64 +24,14 @@ One bash file · one tmux session per repo · zero ceremony.
 
 ---
 
-## ✨ What's new
+## What you get
 
-<table>
-<tr>
-<td width="50%" valign="top">
-
-### 💬 **Pilot mode** &nbsp;<sub>v0.4</sub>
-Talk to one agent. It drives the rest. No new API key — uses whatever agent CLI you already have.
-
-`Ctrl+Space + P` &nbsp;·&nbsp; `ymx --pilot-toggle`
-
-</td>
-<td width="50%" valign="top">
-
-### 🎛 **Control Panel** &nbsp;<sub>v0.3</sub>
-Live dashboard pane: every yaamux session, every pane's health, notifications, hotkey menu.
-
-`Ctrl+Space + p` &nbsp;·&nbsp; `ymx --toggle-panel`
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 🛠 **`git` window** &nbsp;<sub>v0.3.1</sub>
-lazygit + delta + bat in a dedicated window. Plus `--watch-pr`, `--auto-merge`, `--ci-status`, `--diff` — backed by `gh` / `glab` / `tea`.
-
-`Ctrl+Space + G`
-
-</td>
-<td width="50%" valign="top">
-
-### 🪟 **Background panels** &nbsp;<sub>v0.3</sub>
-Run a build / test-watcher / dev server without blocking. Output captured to disk — resume from a byte offset hours later.
-
-`ymx --bg <name> "<cmd>"`
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### 🧭 **Agents know where they are** &nbsp;<sub>v0.3.1</sub>
-Per-pane `YAAMUX_*` env vars + a Claude Code skill auto-installed by `--init`. Agents discover their tools without being told.
-
-`ymx --agent-brief`
-
-</td>
-<td width="50%" valign="top">
-
-### 🧱 **Pluggable forge** &nbsp;<sub>v0.3.1</sub>
-PR / CI flags auto-detect your git host. Works on **GitHub** (full), **GitLab** (create + merge), **Gitea** (create). Override with `YAAMUX_FORGE`.
-
-`ymx --pr N` &nbsp;·&nbsp; `--ci-status` &nbsp;·&nbsp; `--diff N`
-
-</td>
-</tr>
-</table>
+- 💬 **[Pilot mode](#-pilot-mode--drive-the-agent-grid-by-chat)** — talk to one agent, it drives the rest. No new API key; uses whichever agent CLI you already have. Bound to `Ctrl+Space + P`.
+- 🎛 **[Control Panel pane](#-control-panel-pane)** — a live dashboard alongside the agents showing every session, every pane's health, recent notifications, and one-key actions. Toggle with `Ctrl+Space + p`.
+- 🛠 **[`git` window](#-git-window--lazygit--prci-flags)** — `lazygit` in a dedicated window with `delta`-highlighted diffs, plus `--pr` / `--watch-pr` / `--auto-merge` / `--ci-status` / `--diff` flags. Auto-detects GitHub / GitLab / Gitea. Jump in with `Ctrl+Space + G`.
+- 🪟 **[Background panels](#-background-panels--long-running-shell-jobs)** — long-running shells (builds, test watchers, dev servers) that don't block an agent. Output captured to disk so you can resume reading from a byte offset hours later.
+- 🧭 **[Session-aware agents](#-agents-know-where-they-are)** — every agent pane is spawned with `YAAMUX_*` env vars so it knows its number, its session, and its tools. `ymx --agent-brief` emits a drift-guarded brief; `ymx --init` installs a Claude Code skill so agents pick it up automatically.
+- 📲 **[Drive from anywhere](#-drive-them-from-anywhere)** — laptop, iPhone, iPad, push notification. `ymx --remote`, QR-encoded `mosh://` URLs, width-adaptive `--auto-attach`. No yaamux on the remote required.
 
 ---
 
@@ -263,7 +212,7 @@ $ echo "I am agent ${YAAMUX_AGENT_NUMBER} of ${YAAMUX_AGENT_TOTAL}, type ${YAAMU
 I am agent 2 of 4, type claude
 
 $ yaamux --agent-brief --format text
-yaamux agent brief (v0.4.0)
+yaamux agent brief
 
 Situational context:
   agent:    agent-2 (2/4)
