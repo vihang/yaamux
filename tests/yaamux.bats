@@ -104,6 +104,61 @@ STUB
   rm -rf "$stub_dir"
 }
 
+# ── --prepare-host (host-level mosh-server PATH fix for iOS mosh:// URLs) ─────
+
+@test "--prepare-host rejects bogus sub-arg" {
+  run_yaamux --prepare-host --bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage"* ]]
+}
+
+@test "--prepare-host --check is read-only and fails clearly when mosh-server is absent" {
+  # Hide any system mosh-server: reduce PATH so `command -v mosh-server`
+  # in _prepare_host_mosh's first guard returns false. (PATH=/usr/bin:/bin
+  # is what ssh non-interactive sees, and we skip if either of the
+  # hard-coded paths in _mosh_server_on_default_path is populated.)
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server ]]; then
+    skip "mosh-server is on the default PATH here — can't test the missing case"
+  fi
+  PATH=/usr/bin:/bin run_yaamux --prepare-host --check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not installed"* ]]
+  [[ "$output" == *"brew install mosh"* ]]
+}
+
+@test "--connect points users at --prepare-host when mosh is installed but mosh-server is off PATH" {
+  # Stub `mosh` so the connect-output's `command -v mosh` check is true.
+  # On the test runner /usr/local/bin/mosh-server and /usr/bin/mosh-server
+  # are absent, so _mosh_server_on_default_path returns false and the
+  # warning fires.
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server ]]; then
+    skip "mosh-server is on the default PATH here — warning won't fire"
+  fi
+  stub_dir="$(mktemp -d -t yaamux-moshstub-XXXXXX)"
+  cat > "${stub_dir}/mosh" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "${stub_dir}/mosh"
+
+  PATH="${stub_dir}:${PATH}" run_yaamux --connect
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yaamux --prepare-host"* ]]
+
+  rm -rf "$stub_dir"
+}
+
+@test "_mosh_server_on_default_path: returns true iff /usr/local/bin or /usr/bin has mosh-server" {
+  # Source the helper and reflect actual filesystem state.
+  body="$(awk '/^_mosh_server_on_default_path\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server ]]; then
+    _mosh_server_on_default_path
+  else
+    ! _mosh_server_on_default_path
+  fi
+}
+
 @test "--list with no sessions reports empty (human)" {
   run_yaamux --list
   [ "$status" -eq 0 ]

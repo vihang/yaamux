@@ -127,7 +127,7 @@ The `yaamux` file is ordered top-to-bottom as:
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` |
-| Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` |
+| Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` / `_prepare_host_mosh` (host-level mosh-server PATH fix for `mosh://` URLs) |
 | Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |
 | Pane health | `_pane_state` / `_refresh_pane_states` / `_restart_pane` / `_triage_prompt` / `_remote_triage_prompt` — back `--restart-current` / `--restart-dead` / `--refresh-states` and the attach-time triage |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |

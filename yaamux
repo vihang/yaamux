@@ -27,6 +27,7 @@
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
 #    yaamux --connect [--qr]            # print/QR the exact commands to attach from any device
+#    yaamux --prepare-host [--check]    # one-time: symlink mosh-server so iOS mosh:// works (macOS Homebrew)
 #    yaamux --init | --install | --update | --uninstall | --add-docs | --version | --keys
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
@@ -691,6 +692,71 @@ _uninstall_yaamux() {
   log "The yaamux repo at $YAAMUX_HOME and per-project .claude/ files are untouched."
 }
 
+# Make mosh-server reachable from a bare `mosh user@host` — the form iOS
+# clients (Blink, Prompt 3, Termius) use when opening a `mosh://` URL.
+# Background: yaamux's QR code encodes `mosh://user@host` (not the full
+# shell snippet) so iOS Vision opens it as a URL rather than misreading
+# `user@host.tld` as an email and offering Mail.app. The trade-off is
+# that the URL scheme can't carry the `--server=` PATH prelude that
+# `--remote --mosh` and the printed snippet use, so on macOS Homebrew
+# hosts (where mosh-server sits in /opt/homebrew/bin, off ssh's
+# non-interactive PATH) the iOS client hits "NoMoshServerArgs". This
+# fix symlinks the real mosh-server into /usr/local/bin — which IS on
+# /etc/paths — so every mosh client just works. One-time, per host.
+# `--check` is read-only and exits non-zero if the fix would be needed.
+_prepare_host_mosh() {
+  local mode="${1:-apply}"
+  case "$mode" in apply|--apply) mode=apply ;; --check|check) mode=check ;;
+    *) die "Usage: yaamux --prepare-host [--check]" ;; esac
+
+  if ! command -v mosh-server &>/dev/null; then
+    if [[ "$mode" == check ]]; then
+      warn "mosh-server not installed on this host."
+      warn "Install with: ${BOLD}brew install mosh${NC}  (or your distro's package manager)"
+      return 1
+    fi
+    die "mosh-server not installed. Install with: brew install mosh"
+  fi
+
+  local actual target="/usr/local/bin/mosh-server"
+  actual="$(command -v mosh-server)"
+
+  # Already discoverable? Either /usr/local/bin/mosh-server is the real
+  # binary (Intel Homebrew, MacPorts in some configs), or someone has
+  # already created the symlink (us, or a previous fix). Either way, no-op.
+  if _mosh_server_on_default_path; then
+    local found="/usr/local/bin/mosh-server"
+    [[ -x "$found" ]] || found="/usr/bin/mosh-server"
+    if [[ -L "$found" ]]; then
+      log "mosh-server already symlinked: ${found} → $(readlink "$found")"
+    else
+      log "mosh-server already on ssh's default PATH at ${found}"
+    fi
+    log "No fix needed. iOS clients opening mosh://user@host on this host will find mosh-server."
+    return 0
+  fi
+
+  # Need the fix. In check mode, just report.
+  if [[ "$mode" == check ]]; then
+    warn "mosh-server is at ${actual} — off ssh's non-interactive PATH."
+    warn "iOS clients opening mosh://user@host (the QR code) will see 'NoMoshServerArgs'."
+    warn "Fix once: ${BOLD}yaamux --prepare-host${NC}"
+    return 1
+  fi
+
+  log "mosh-server is at ${actual} — off ssh's default PATH."
+  log "Will create symlink: ${target} → ${actual}  (needs sudo for /usr/local/bin)."
+
+  if [[ ! -d /usr/local/bin ]]; then
+    log "Creating /usr/local/bin (missing)..."
+    sudo mkdir -p /usr/local/bin || die "Failed to create /usr/local/bin"
+  fi
+
+  sudo ln -sf "$actual" "$target" || die "Failed to create ${target}"
+  log "Done. ${target} → ${actual}"
+  log "iOS clients opening mosh://user@host on this host will now find mosh-server."
+}
+
 _add_docs() {
   if [[ -f "${YAAMUX_HOME}/YAAMUX.md" ]]; then
     cp "${YAAMUX_HOME}/YAAMUX.md" "${REPO_ROOT}/YAAMUX.md"
@@ -828,6 +894,16 @@ REMOTE_PATH_PRELUDE='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bi
 # 'new -s -c …' to whatever --server= specifies, so the value ends at the bare
 # mosh-server invocation.
 MOSH_SERVER_CMD="${REMOTE_PATH_PRELUDE}; exec mosh-server"
+
+# Is mosh-server on the PATH that ssh (non-interactive) and mosh-client see by
+# default? Used by the startup self-check and `--prepare-host`. /usr/local/bin
+# and /usr/bin are both on macOS `path_helper`'s defaults (and on every Linux
+# distro). /opt/homebrew/bin (Apple Silicon Homebrew) is NOT — so a fresh M-
+# series Mac with `brew install mosh` has mosh-server invisible to a bare
+# `mosh user@host` (the form iOS clients use when opening a `mosh://` URL).
+_mosh_server_on_default_path() {
+  [[ -x /usr/local/bin/mosh-server ]] || [[ -x /usr/bin/mosh-server ]]
+}
 
 # Common ssh options reused by every remote call.  ConnectTimeout caps the
 # wait on unreachable hosts.  ControlMaster shares one auth across the list,
@@ -1130,6 +1206,7 @@ yaamux CLI (from any shell inside the repo):
   yaamux --mobile-attach [repo]     attach with one pane zoomed (iPhone)
   yaamux --mobile-grid              multi-repo umbrella, mouse on (iPad)
   yaamux --connect [--qr]           print connect commands (+ optional QR)
+  yaamux --prepare-host [--check]   one-time: symlink mosh-server so iOS mosh:// works
   yaamux --list [--json]            list all yaamux sessions
   yaamux --status                   per-pane health snapshot
   yaamux --send N "text"            send text to pane N (1-based)
@@ -1315,6 +1392,7 @@ case "${1:-}" in
     exit $? ;;
   --ssh-config)     _gen_ssh_config;      exit 0 ;;
   --install-service) _install_launchagent; exit 0 ;;
+  --prepare-host)   _prepare_host_mosh "${2:-apply}"; exit $? ;;
 
   --remote)
     shift
@@ -1361,15 +1439,21 @@ case "${1:-}" in
     printf '    %s\n\n' "$_c_cmd_ssh"
     printf '  %bDesktop%b — yaamux installed on the client:\n' "$BOLD" "$NC"
     printf '    %s\n\n' "$_c_cmd_remote"
+    # Pre-flight: warn if the QR's `mosh://` URL would fail on this host
+    # (mosh-server off ssh's non-interactive PATH — typical on macOS Homebrew).
+    # The full mosh snippet above still works because it bakes --server=, but
+    # the QR scan doesn't, so surface the one-line fix before users scan.
+    if command -v mosh &>/dev/null && ! _mosh_server_on_default_path; then
+      printf '  %bHeads up%b — mosh-server is off ssh'\''s default PATH on this host.\n' "$YELLOW" "$NC"
+      printf '    The full mosh line above still works (bakes the PATH fix).\n'
+      printf '    The QR / mosh://user@host below will hit NoMoshServerArgs until you run:\n'
+      printf '      %byaamux --prepare-host%b   (one-time, sudo — symlinks /usr/local/bin/mosh-server)\n\n' "$BOLD" "$NC"
+    fi
     if $_c_qr; then
       if command -v qrencode &>/dev/null; then
         printf '  %bQR%b — scan with iOS Camera → tap result → opens in Blink / Prompt 3 / Termius:\n' "$BOLD" "$NC"
         printf '    (encodes %s — run  yaamux --auto-attach  once connected)\n' "$_c_qr_payload"
         qrencode -t ansiutf8 -- "$_c_qr_payload"
-        printf '    If mosh fails with NoMoshServerArgs, mosh-server is off SSH'\''s default PATH on\n'
-        printf '    the remote.  Either copy/paste the full mosh line above (it bakes the PATH fix),\n'
-        # shellcheck disable=SC2016  # $(…) is literal shell that the user copy-pastes, not for us to expand
-        printf '    or shim it:  sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server\n'
         echo ""
       else
         warn "qrencode not installed — brew install qrencode  (then re-run with --qr)"
@@ -1775,6 +1859,14 @@ fi
 
 MOSH_OK=false
 command -v mosh &>/dev/null && MOSH_OK=true || warn "mosh not found — brew install mosh"
+# If mosh is installed but mosh-server isn't on ssh's non-interactive PATH,
+# iOS clients opening the QR'd `mosh://user@host` URL will hit NoMoshServerArgs.
+# This is the v0.1.8 trade-off: the URL scheme can't carry the --server= PATH
+# prelude. Surface the fix once at startup so users find it before scanning.
+if $MOSH_OK && ! _mosh_server_on_default_path; then
+  warn "mosh-server is off ssh's non-interactive PATH — iOS mosh:// QR will fail with NoMoshServerArgs."
+  warn "Fix once: ${BOLD}yaamux --prepare-host${NC}  (symlinks mosh-server into /usr/local/bin, needs sudo)"
+fi
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] && $HAS_CLAUDE && \
   warn "ANTHROPIC_API_KEY set — Claude Remote Control needs claude.ai OAuth"
 [[ -n "${NTFY_TOPIC:-}" ]] && $HOST_IS_LOCAL && \

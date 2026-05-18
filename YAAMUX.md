@@ -86,6 +86,7 @@ multiple repos simultaneously without collision.
 | `--mobile-attach [repo] [pane]` | Attach with one pane zoomed (iPhone-friendly) |
 | `--mobile-grid` | Build the iPad umbrella session across every yaamux- session |
 | `--connect [--qr]` | Print exact connect commands (+ optional QR encoding `mosh://user@host` for one-tap open in Blink / Prompt / Termius) |
+| `--prepare-host [--check]` | One-time: symlink `mosh-server` into `/usr/local/bin` so iOS clients opening the QR'd `mosh://` URL find it (macOS Homebrew hosts only — `--check` is read-only) |
 | `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
@@ -251,9 +252,20 @@ recognizes URL schemes over email-address patterns, so the scan offers a one-tap
 and offering Mail.app. The trade-off: a URL scheme can't carry the
 `--server='export PATH=…; exec mosh-server'` PATH fix that the full snippet does.
 If the QR scan hits `NoMoshServerArgs` (typical on macOS Homebrew hosts where
-`mosh-server` sits in `/opt/homebrew/bin`, off SSH's default PATH), either copy
-the full mosh line printed above the QR — it bakes the PATH fix — or shim it
-once with `sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server`.
+`mosh-server` sits in `/opt/homebrew/bin`, off SSH's default PATH), run the
+one-shot fix on the host:
+
+```bash
+yaamux --prepare-host           # symlinks mosh-server into /usr/local/bin (sudo)
+yaamux --prepare-host --check   # read-only — reports whether the fix is needed
+```
+
+Equivalent manual command if you'd rather not run yaamux for it:
+`sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server`.
+
+yaamux also detects the broken PATH at startup and prints the same hint, and
+`--connect`/`Ctrl+Space C` warns before showing the QR so you fix it once
+before scanning.
 
 **Cross-device handoff from iPad/phone**: the popup bindings also work *inside*
 the iPad's mobile-grid and the iPhone's mob-`$$` sessions (those sessions set
@@ -511,6 +523,6 @@ After first `yaamux N [...]` run:
 | Claude Remote Control fails | Unset `ANTHROPIC_API_KEY`; run `claude auth login` |
 | `Ctrl+Space` does nothing | Disable the macOS input-source shortcut |
 | mosh won't connect | Open UDP 60000-61000, or use Tailscale |
-| `NoMoshServerArgs` / mosh-server not found | Copy the `mosh --server='…' user@host -- …` line from yaamux's launch banner — it bakes the PATH fix in |
+| `NoMoshServerArgs` / mosh-server not found (iOS QR scan / bare `mosh user@host`) | Run `yaamux --prepare-host` on the host once (sudo — symlinks mosh-server into `/usr/local/bin`). The full `mosh --server='…' user@host -- …` line still works as a per-call workaround |
 | Session already running | `--attach` to join, or `--kill` then restart |
 | A pane died | `yaamux --restart N` |
