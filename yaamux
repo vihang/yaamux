@@ -718,7 +718,11 @@ _remote_resolve_host() {
 # distinguish "no sessions" from "tmux unavailable".
 _remote_list_raw() {
   local target="$1"
+  # Non-interactive ssh doesn't source .zshrc / .bashrc, so user PATH additions
+  # (notably /opt/homebrew/bin on Apple Silicon macs) aren't present. Extend
+  # PATH up front so tmux is discoverable even when Homebrew/MacPorts/user-local.
   ssh -o ConnectTimeout=10 -- "$target" '
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin"
 command -v tmux >/dev/null 2>&1 || { echo "tmux not found on remote" >&2; exit 127; }
 tmux list-sessions -F "#{session_name}|#{session_attached}" 2>/dev/null | while IFS="|" read -r n a; do
   case "$n" in yaamux-*) ;; *) continue;; esac
@@ -819,9 +823,12 @@ _remote_normalize_session() {
 _remote_attach() {
   local target="$1" session="$2" zoom_idx="${3:-}"
   case "$session" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name: ${session}" ;; esac
-  local remote_cmd="tmux attach -t '${session}'"
+  # Extend PATH on the remote — non-interactive ssh doesn't source profile,
+  # so Homebrew/MacPorts/user-local install dirs are missing by default.
+  local path_ext='PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin";'
+  local remote_cmd="${path_ext} tmux attach -t '${session}'"
   if [[ -n "$zoom_idx" ]]; then
-    remote_cmd="tmux select-window -t '${session}:agents' \\; \
+    remote_cmd="${path_ext} tmux select-window -t '${session}:agents' \\; \
 select-pane -t '${session}:agents.${zoom_idx}' \\; \
 resize-pane -t '${session}:agents.${zoom_idx}' -Z \\; \
 attach -t '${session}'"
@@ -933,6 +940,7 @@ _remote_dispatch() {
       case "$sess" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name." ;; esac
       header "remote status: ${target} :: ${sess}"
       ssh -o ConnectTimeout=10 -- "$target" "
+PATH=\"\$PATH:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:\$HOME/.local/bin:\$HOME/bin\"
 tmux list-windows -t '${sess}' 2>/dev/null || echo '  (session not found)'
 echo
 tmux list-panes -t '${sess}:agents' -F '  pane #{pane_index}: #{pane_title}  dead=#{pane_dead}' 2>/dev/null || true
