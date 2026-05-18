@@ -233,6 +233,12 @@ tap the result, paste into Blink Shell. The QR encodes the full
 the iPad/iPhone gets the right UI automatically (zoom on iPhone, grid on iPad,
 full grid on a tablet held in landscape with a tiny font).
 
+**Cross-device handoff from iPad/phone**: the popup bindings also work *inside*
+the iPad's mobile-grid and the iPhone's mob-`$$` sessions (those sessions set
+the `Ctrl+Space` prefix to match the yaamux defaults). So you can already be
+attached from your iPad, hit `Ctrl+Space Q`, and your phone scans the same QR
+to attach itself — or `Ctrl+Space C` to copy the line and AirDrop it.
+
 ### One snippet for every device (`--auto-attach`)
 
 `yaamux --auto-attach` reads the client terminal's width and routes to the

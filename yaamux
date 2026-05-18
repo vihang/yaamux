@@ -359,8 +359,9 @@ tmux new-session -d -s "$MOB" -t "$SESSION" 2>/dev/null || {
 tmux select-window -t "${MOB}:agents" 2>/dev/null || tmux select-window -t "${MOB}:0" 2>/dev/null || true
 tmux select-pane   -t "${MOB}:agents.${PANE_INDEX}" 2>/dev/null || true
 tmux resize-pane   -t "${MOB}:agents.${PANE_INDEX}" -Z 2>/dev/null || true
+tmux set-option -t "$MOB" prefix C-Space
 tmux set-option -t "$MOB" status-left  "#[fg=colour46,bold] 📱 agent-$((PANE_INDEX+1)) "
-tmux set-option -t "$MOB" status-right "#[fg=colour226]mob | detach C-Space+D"
+tmux set-option -t "$MOB" status-right "#[fg=colour226]C connect · Q QR · D detach"
 echo "📱  ${SESSION} · agent-$((PANE_INDEX+1)) — detach: Ctrl+Space + D"
 trap "tmux kill-session -t '$MOB' 2>/dev/null || true" EXIT
 tmux attach -t "$MOB"
@@ -1440,9 +1441,13 @@ case "${1:-}" in
       die "Could not link any yaamux session windows (expected window name: 'agents')."
     fi
     tmux kill-window -t "${_mg_umbrella}:init" 2>/dev/null || true
+    # Match yaamux's prefix so `Ctrl+Space C` / `Ctrl+Space Q` (and arrows, zoom,
+    # detach …) work consistently when the umbrella is the user's only client —
+    # otherwise the umbrella would silently inherit the user's default (C-b).
+    tmux set-option -t "$_mg_umbrella" prefix C-Space
     tmux set-option -t "$_mg_umbrella" mouse on
     tmux set-option -t "$_mg_umbrella" status-left  "#[fg=colour46,bold] grid "
-    tmux set-option -t "$_mg_umbrella" status-right "#[fg=colour226]Ctrl+Space n/p · Z zoom · D detach"
+    tmux set-option -t "$_mg_umbrella" status-right "#[fg=colour226]Ctrl+Space n/p · C connect · Q QR · D detach"
     tmux select-window -t "${_mg_umbrella}:^"
     log "yaamux grid — ${_mg_linked} repo(s) · Ctrl+Space n/p swipes · D detaches"
     exec tmux attach -t "$_mg_umbrella" ;;
