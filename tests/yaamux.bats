@@ -845,6 +845,41 @@ _forge_helpers_body() {
   [ "$(forge_provider)" = "github" ]
 }
 
+# Drift-guard: every supported URL form must strip user@ and :port before
+# matching, so `ssh://git@github.com/foo/bar.git` and the SCP-style
+# `git@github.com:foo/bar.git` resolve to identical hosts (and identical
+# providers). Same for HTTPS basic-auth URLs.
+@test "forge_url_hostname: strips user@ and :port across schemes" {
+  eval "$(_forge_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_FORGE
+  # SCP-style — already known to work
+  [ "$(forge_url_hostname 'git@github.com:foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo
+  [ "$(forge_url_hostname 'ssh://git@github.com/foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo + port
+  [ "$(forge_url_hostname 'ssh://git@github.com:22/foo/bar.git')" = "github.com" ]
+  # https:// with basic auth
+  [ "$(forge_url_hostname 'https://user:pass@gitlab.example.com/foo/bar.git')" = "gitlab.example.com" ]
+  # Plain https://
+  [ "$(forge_url_hostname 'https://github.com/foo/bar.git')" = "github.com" ]
+  # Empty / unrecognized
+  [ "$(forge_url_hostname '')" = "" ]
+  [ "$(forge_url_hostname 'not-a-url')" = "" ]
+}
+
+# End-to-end via forge_provider: ssh:// with userinfo must route correctly
+# (was the original bug — `ssh://git@github.com/...` was hitting `other`).
+@test "forge_provider: ssh:// with user@ routes to the right forge" {
+  eval "$(_forge_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_FORGE
+  git -C "$TEST_REPO" remote add origin ssh://git@github.com/foo/bar.git
+  [ "$(forge_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin ssh://git@gitlab.com:22/foo/bar.git
+  [ "$(forge_provider)" = "gitlab" ]
+}
+
 @test "forge_bin: maps provider to gh / glab / tea / empty" {
   eval "$(_forge_helpers_body)"
   REPO_ROOT="$TEST_REPO"
