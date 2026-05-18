@@ -1108,19 +1108,22 @@ In-session keys (press Ctrl+Space, then the key):
 
 yaamux CLI (from any shell inside the repo):
 
-  yaamux --attach              re-attach to this session
-  yaamux --status              per-pane health snapshot
-  yaamux --send N "text"       send text to pane N (1-based)
-  yaamux --broadcast "text"    send to every pane
-  yaamux --exec N "cmd"        run shell command in pane N
-  yaamux --restart N           relaunch the agent in pane N
-  yaamux --zoom N              attach with pane N zoomed
-  yaamux --logs                tail combined agent logs
-  yaamux --pr N [title]        open PR for pane N's worktree
-  yaamux --kill                kill this session
-  yaamux --clean               remove stale worktrees
-  yaamux --remote <host>       pick + attach to a remote session
-  yaamux --remote-hosts        list saved host aliases
+  yaamux --attach                   re-attach to this session
+  yaamux --list [--json]            list all yaamux sessions
+  yaamux --status                   per-pane health snapshot
+  yaamux --send N "text"            send text to pane N (1-based)
+  yaamux --broadcast "text"         send to every pane
+  yaamux --exec N "cmd"             run shell command in pane N
+  yaamux --restart N                relaunch the agent in pane N
+  yaamux --restart-dead [-y]        restart every dead / idle agent
+  yaamux --zoom N                   attach with pane N zoomed
+  yaamux --vscode N                 open pane N's worktree in VS Code
+  yaamux --logs                     tail combined agent logs
+  yaamux --pr N [title] [--merge]   push + open PR for pane N
+  yaamux --kill                     kill this session
+  yaamux --clean [--force]          remove worktrees (--force = dirty too)
+  yaamux --remote <host>            pick + attach to a remote session
+  yaamux --remote-hosts             list saved host aliases
 KEYS
 }
 
@@ -1628,7 +1631,7 @@ tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
 tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
   "run-shell -b '${SELF} --restart-dead -y'"
 tmux bind-key      -T prefix L send-keys C-l \; clear-history
-tmux bind-key      -T prefix '?' display-popup -E -w 84 -h 36 \
+tmux bind-key      -T prefix '?' display-popup -E -w 88 -h 40 \
   "'${SELF}' --keys | less -R"
 tmux bind-key      -T prefix '/' list-keys
 tmux set-option    -t "$SESSION" mouse on
