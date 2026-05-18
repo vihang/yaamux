@@ -234,6 +234,51 @@ yaamux's launch banner prints this exact line — easiest to copy from there.
 Set up one snippet per repo with the repo name appended, or one generic snippet
 that uses the picker when several sessions are running.
 
+### iPad-friendly multi-repo grid (`--mobile-grid`)
+
+An iPad 11-inch (and larger) has the screen real estate for the full 2×2 agent
+grid, so the iPhone "force-zoom one pane" approach loses information.
+`yaamux --mobile-grid` builds a single umbrella tmux session with one window
+per running `yaamux-<repo>` (linked in via `tmux link-window` — they are the
+real agents windows, changes propagate live in both directions), `mouse on`
+for tap-to-focus, no forced zoom.
+
+```bash
+yaamux --mobile-grid                  # umbrella across every running yaamux- session
+```
+
+From Blink / Prompt 3 on iPad (mosh, sleep-safe):
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --mobile-grid
+```
+
+Navigation inside the umbrella:
+
+| Action | Keys / gesture |
+|--------|----------------|
+| Next / prev repo | `Ctrl+Space n` / `Ctrl+Space p` |
+| Focus an agent (within the current repo) | Tap (mouse on) or `Ctrl+Space` + arrows |
+| Zoom focused agent | `Ctrl+Space Z` |
+| Repo picker | `Ctrl+Space w` (tmux choose-window) |
+| Detach | `Ctrl+Space D` |
+
+The umbrella is named `mobile-grid` (no `yaamux-` prefix — won't show up in
+`--list` or the `--mobile-attach` picker) and is rebuilt fresh on every call,
+so just re-run `--mobile-grid` after starting new yaamux sessions to pick them
+up. Repo labels in the tab list come from a per-window `@yaamux-repo` user
+option (so the underlying window name stays `agents` and every other yaamux
+helper that targets `${SESSION}:agents` keeps working). Killing the umbrella
+leaves the underlying yaamux sessions untouched.
+
+Tradeoffs:
+- **Mouse mode** hijacks native iPad text selection inside panes. In Blink,
+  hold Option to fall back to native select; Prompt 3 has an equivalent
+  modifier in its keyboard preferences.
+- **Rebuild on session changes** — `--mobile-grid` snapshots the running
+  yaamux sessions at the time it's invoked. Re-run to refresh.
+
 ### Per-agent native remote
 
 | Agent | Remote path |
