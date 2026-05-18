@@ -1,0 +1,75 @@
+name: Auto-tag on VERSION bump
+
+# When `VERSION` changes on main (typically because a release-bump PR was
+# merged), tag the commit `v<VERSION>` and trigger the Release workflow.
+#
+# This lets you cut a release by merging a one-line PR — no local
+# `git tag && git push` step needed.
+#
+# Why two hops (push tag, then `gh workflow run`):
+#   - Tags pushed using the default `GITHUB_TOKEN` do NOT fire other
+#     workflows (GitHub's anti-recursion rule), so the existing
+#     `release.yml` trigger on `push: tags: 'v*'` wouldn't fire on its own.
+#   - We push the tag (so `release.yml` has something to validate against)
+#     and then explicitly dispatch `release.yml` with that tag.
+
+on:
+  push:
+    branches: [main]
+    paths: ['VERSION']
+
+permissions:
+  contents: write   # create + push the tag
+  actions:  write   # dispatch release.yml
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read VERSION → tag
+        id: ver
+        run: |
+          set -euo pipefail
+          v="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.+-]+)?$ ]]; then
+            echo "VERSION '$v' is not X.Y.Z (or X.Y.Z-prerelease) — refusing to tag." >&2
+            exit 1
+          fi
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if tag already exists
+        id: check
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin; nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create + push tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.email "release-bot@yaamux"
+          git config user.name  "yaamux-release-bot"
+          git tag -a "$TAG" -m "yaamux $TAG"
+          git push origin "$TAG"
+
+      - name: Dispatch Release workflow
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref main -f tag="$TAG"
