@@ -29,7 +29,8 @@
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
 #    yaamux --connect [--qr]            # print/QR the exact commands to attach from any device
 #    yaamux --prepare-host [--check]    # one-time: symlink mosh-server so iOS mosh:// works (macOS Homebrew)
-#    yaamux --init | --install | --update | --uninstall | --add-docs | --version | --keys
+#    yaamux --init [--copy-skill] | --install | --update | --uninstall | --add-docs | --version | --keys
+#    yaamux --agent-brief [--format markdown|text|json]   # agent-optimized CLI summary
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
 #  Prefix: Ctrl+Space
@@ -49,7 +50,11 @@ SELF="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 YAAMUX_HOME="$(dirname "$SELF")"
 
 # ── Project context ────────────────────────────────────────────────────────────
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# YAAMUX_REPO_ROOT is set per-pane in the launch loop so an agent running from
+# one of its worktrees (where `git rev-parse --show-toplevel` would resolve to
+# the worktree path) still sees the *main* checkout — keeping SESSION, PANELS_DIR
+# and friends consistent with the user's main `yaamux --bg-list` / `--status`.
+REPO_ROOT="${YAAMUX_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 PROJECT_NAME="$(basename "$REPO_ROOT")"
 SESSION="yaamux-${PROJECT_NAME}"                 # one session per repo
 WORKTREES_BASE="${REPO_ROOT}/../${PROJECT_NAME}-worktrees"
@@ -138,13 +143,31 @@ agent_idle_pattern() {
 # host CLI (gh, glab, …) goes through this family — never inline `gh`/`glab`
 # elsewhere. Adding GitLab later = filling in the `gitlab)` cases here.
 # Override auto-detection with $YAAMUX_GIT_HOST.
+
+# Extract the hostname from a git remote URL. Handles https://, ssh://, and
+# the bare `user@host:path` SSH form. Returns empty on unrecognized input.
+# We match on the hostname (not the whole URL) so a github.com repo named
+# something like "gitea-foo" doesn't get mis-detected as a Gitea forge.
+_host_url_hostname() {
+  local url="$1" rest
+  case "$url" in
+    http://*|https://*) rest="${url#*://}";   echo "${rest%%/*}" ;;
+    ssh://*)            rest="${url#ssh://}"; echo "${rest%%/*}" ;;
+    *@*:*)              rest="${url#*@}";     echo "${rest%%:*}" ;;
+    *)                  echo "" ;;
+  esac
+}
+
 _host_provider() {
   [[ -n "${YAAMUX_GIT_HOST:-}" ]] && { echo "$YAAMUX_GIT_HOST"; return; }
-  local url; url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-  case "$url" in
-    *github.com*)            echo github ;;
-    *gitlab.com*|*gitlab.*)  echo gitlab ;;
-    *)                       echo other  ;;
+  local url host
+  url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  host="$(_host_url_hostname "$url")"
+  case "$host" in
+    github.com|*.github.com)                       echo github ;;
+    gitlab.com|*.gitlab.com|gitlab.*)              echo gitlab ;;
+    codeberg.org|gitea.com|*.codeberg.org|gitea.*) echo gitea  ;;
+    *)                                             echo other  ;;
   esac
 }
 _host_cli() {
@@ -155,19 +178,33 @@ _host_cli() {
   esac
 }
 # PR create — $1=wt $2=base $3=branch $4=title(opt). Echoes PR URL on success.
+# We `cd` into the worktree before invoking the forge CLI so `gh`/`glab`/`tea`
+# can resolve the repo context unambiguously — `--fill` reads commit messages
+# from the current branch in cwd, so without the cd it would auto-fill from
+# the wrong repo when yaamux is run from anywhere outside the worktree.
 _host_pr_create() {
+  local wt="$1" base="$2" head="$3" title="${4:-}" args
   case "$(_host_provider)" in
     github)
-      local args=(--fill --base "$2" --head "$3")
-      [[ -n "${4:-}" ]] && args+=(--title "$4")
-      gh pr create "${args[@]}" ;;
+      args=(--fill --base "$base" --head "$head")
+      [[ -n "$title" ]] && args+=(--title "$title")
+      ( cd "$wt" && gh pr create "${args[@]}" ) ;;
     *) die "PR create not implemented for $(_host_provider). Set YAAMUX_GIT_HOST or open the PR manually." ;;
   esac
 }
 # PR lookup — $1=wt → echoes PR URL for the worktree's current branch.
 _host_pr_url() {
+  # $1=wt. Branch is passed positionally to `gh pr view` so it isn't inferred
+  # from caller CWD — yaamux runs from anywhere, not the worktree. Branch
+  # resolution lives inside the github arm so non-github providers still hit
+  # "not implemented" cleanly (they don't need the branch at all).
   case "$(_host_provider)" in
-    github) gh -R "$(git -C "$1" remote get-url origin)" pr view --json url -q .url ;;
+    github)
+      local branch
+      branch="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
+        || die "Could not resolve current branch in $1."
+      [[ -n "$branch" ]] || die "Could not resolve current branch in $1."
+      gh -R "$(git -C "$1" remote get-url origin)" pr view "$branch" --json url -q .url ;;
     *)      die "PR lookup not implemented for $(_host_provider)." ;;
   esac
 }
@@ -893,7 +930,19 @@ _restart_pane() {
     sleep 0.5
   fi
   log "Restarting ${agent_name} (${type})..."
-  tmux send-keys -t "${SESSION}:agents.${idx}" "$(agent_cmd "$type" "$agent_name")" Enter
+  # Re-inject the per-agent YAAMUX_* env vars — the session-level set-environment
+  # only reaches *new* shells (respawn-pane gives us one), but the agent-scoped
+  # ones (NAME/NUMBER/TYPE/PANE_ID) aren't session-wide. Pull NUMBER back from
+  # the agent name (`agent-N` → N) so manual restart matches the launch order.
+  local agent_num="${agent_name#agent-}"
+  local agent_total
+  agent_total="$(tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
+    | grep -cx 'agent' 2>/dev/null || true)"
+  [[ -z "$agent_total" || "$agent_total" == "0" ]] && agent_total="$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  local apid
+  apid="$(tmux display-message -p -t "${SESSION}:agents.${idx}" '#{pane_id}' 2>/dev/null || echo '')"
+  tmux send-keys -t "${SESSION}:agents.${idx}" \
+    "export YAAMUX_AGENT_NAME='${agent_name}' YAAMUX_AGENT_NUMBER='${agent_num}' YAAMUX_AGENT_TOTAL='${agent_total}' YAAMUX_AGENT_TYPE='${type}' YAAMUX_SESSION='${SESSION}' YAAMUX_PANE_ID='${apid}' YAAMUX_REPO_ROOT='${REPO_ROOT}' YAAMUX_AGENT_MODE=safe; clear; $(agent_cmd "$type" "$agent_name")" Enter
   tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-state "running" 2>/dev/null || true
 }
 
@@ -1679,9 +1728,54 @@ Aider, Gemini CLI, Copilot, and 60+ other tools — see https://agents.md/.
 ## PR guidelines
 <!-- e.g., one feature per PR; tests required; conventional commits -->
 
-## Notes for agents
+## yaamux runtime
+
 This project uses yaamux (https://github.com/vihang/yaamux) to orchestrate
-parallel agent worktrees. See YAAMUX.md for the per-pane CLI.
+parallel agent worktrees. If you are reading this from inside a yaamux pane,
+you have a set of environment variables that describe your situation:
+
+| Var | What it tells you |
+|-----|-------------------|
+| `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
+| `YAAMUX_AGENT_NUMBER` | 1-based, e.g. `3` |
+| `YAAMUX_AGENT_TOTAL`  | total agents in this session |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
+| `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
+| `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
+| `YAAMUX_VERSION`      | yaamux version string |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent — destructive flags are refused |
+
+Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
+next to the parent of `YAAMUX_REPO_ROOT`.
+
+### Commands you can run from this shell
+
+Read / inspect:
+- `yaamux --list --json` — what other yaamux sessions are running on this machine
+- `yaamux --status` — per-pane health of this session
+- `yaamux --keys` — full CLI reference
+
+Coordinate with siblings:
+- `yaamux --send N "<prompt>"` — send a prompt to sibling agent N
+- `yaamux --exec N "<cmd>" [timeout]` — synchronous: run + wait for completion
+
+Background work (non-blocking):
+- `yaamux --bg <name> "<cmd>"` — start a long-running command in a dedicated pane
+- `yaamux --bg-tail <name> [--from N] [--follow]` — read its output from byte offset N
+- `yaamux --bg-list [--json]` — see all background tasks with status
+- `yaamux --bg-kill <name>` — stop a background task
+
+Ship your work:
+- `yaamux --pr <agent-number> "title"` — push + open a PR for the named agent's worktree
+
+### Don't run these (human-owned)
+
+These are refused while `YAAMUX_AGENT_MODE=safe` — leave to the operator:
+
+- `yaamux --kill` — tears down the session you're running in
+- `yaamux --clean` / `--clean --force` — removes worktrees (including yours)
+- `yaamux --install` / `--uninstall` / `--install-service` — host-level config
 AGENTS_EOF
 }
 
@@ -1706,7 +1800,17 @@ WTI_EOF
 }
 
 _init_repo() {
-  local with_docs="${1:-}"
+  # Parse opt-in flags. `--with-docs` copies YAAMUX.md into the repo;
+  # `--copy-skill` vendors the Claude Code skill instead of symlinking it.
+  local with_docs="" copy_skill=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --with-docs)  with_docs="--with-docs" ;;
+      --copy-skill) copy_skill=1 ;;
+      "" ) ;;
+      *) warn "Unknown --init flag: $arg (try: --with-docs, --copy-skill)" ;;
+    esac
+  done
 
   # AGENTS.md (canonical per agents.md — read by 60+ tools)
   if [[ -f "${REPO_ROOT}/AGENTS.md" ]]; then
@@ -1758,10 +1862,36 @@ STATE_EOF
     log "Wrote .yaamux/state (control-panel defaults)."
   fi
 
-  # .gitignore additions (only if .gitignore is present)
+  # .claude/skills/yaamux/  — Claude Code skill (issue #29 Tier 2). Symlink by
+  # default so `yaamux --update` propagates skill changes; opt out with
+  # `--copy-skill` to vendor a snapshot independent of YAAMUX_HOME.
+  local skill_src skill_dst="${REPO_ROOT}/.claude/skills/yaamux"
+  local skill_was_symlinked=0
+  if skill_src="$(_skill_src)"; then
+    mkdir -p "${REPO_ROOT}/.claude/skills"
+    if [[ -e "$skill_dst" || -L "$skill_dst" ]]; then
+      log ".claude/skills/yaamux already exists — keeping."
+      [[ -L "$skill_dst" ]] && skill_was_symlinked=1
+    elif [[ "$copy_skill" -eq 1 ]]; then
+      cp -R "$skill_src" "$skill_dst"
+      log "Copied skill into .claude/skills/yaamux/ (vendored snapshot)."
+    else
+      ln -s "$skill_src" "$skill_dst"
+      log "Linked .claude/skills/yaamux → ${skill_src}."
+      skill_was_symlinked=1
+    fi
+  else
+    warn "Skill source dir not found (looked under ${YAAMUX_HOME}/skills and ../share/yaamux/skills) — skipping skill install."
+  fi
+
+  # .gitignore additions (only if .gitignore is present). The skill entry
+  # is added only when we're symlinking — a vendored copy is meant to be
+  # tracked by the user, not ignored.
   if [[ -f "${REPO_ROOT}/.gitignore" ]]; then
-    local added=0
-    for entry in ".claude/logs/" "../${PROJECT_NAME}-worktrees/" ".yaamux/state" ".yaamux/panels/" ".yaamux/lazygit/"; do
+    local entries=(".claude/logs/" "../${PROJECT_NAME}-worktrees/" ".yaamux/state" ".yaamux/panels/" ".yaamux/lazygit/")
+    [[ "$skill_was_symlinked" -eq 1 ]] && entries+=(".claude/skills/yaamux")
+    local added=0 entry
+    for entry in "${entries[@]}"; do
       if ! grep -qxF "$entry" "${REPO_ROOT}/.gitignore"; then
         echo "$entry" >> "${REPO_ROOT}/.gitignore"
         added=$((added+1))
@@ -2152,7 +2282,271 @@ yaamux CLI (from any shell inside the repo):
   yaamux --clean [--force]          remove worktrees + bg panels (--force = dirty too)
   yaamux --remote <host>            pick + attach to a remote session
   yaamux --remote-hosts             list saved host aliases
+  yaamux --agent-brief [--format markdown|text|json]
+                                    emit an agent-optimized CLI brief
 KEYS
+}
+
+# ── Agent brief ───────────────────────────────────────────────────────────────
+# `yaamux --agent-brief [--format markdown|text|json]` — emit an
+# agent-optimized CLI brief. The data lives in a single source-of-truth
+# table (_brief_data) so all three formats stay in lockstep, and the bats
+# drift-guard test verifies every flag in the case block is catalogued
+# (either as a user-facing brief row or under the operator-only `internal`
+# / `setup` groups). Issue #29 Tier 2.
+
+_brief_data() {
+  # Tab-separated:   GROUP \t FLAG \t SUMMARY
+  # Groups rendered in the brief (agent-facing): read, coordinate, background, ship, refused
+  # Groups intentionally hidden from the brief: setup (operator-time), internal (UI / connect)
+  # If you add a new flag to the main case block, add it here too — bats catches drift.
+  cat <<'BRIEF_DATA'
+read	--list	list yaamux sessions on this machine (`--list --json` is a stable schema)
+read	--status	per-pane health snapshot of this session
+read	--keys	full CLI cheat sheet
+read	--version	yaamux version
+read	--refresh-states	recompute pane state badges
+read	--ci-status	CI status for an agent's PR: `--ci-status [N]` (no N = every pane that has a PR)
+read	--diff	diff agent N's branch vs `origin/main`: `--diff N` (delta-highlighted if installed)
+coordinate	--send	send a prompt to sibling agent N: `--send N "<prompt>"`
+coordinate	--exec	synchronous run-and-wait: `--exec N "<cmd>" [timeout]`
+coordinate	--broadcast	send to every agent: `--broadcast "<prompt>"`
+coordinate	--restart	relaunch agent N: `--restart N`
+coordinate	--restart-current	relaunch the agent in the current pane
+coordinate	--restart-dead	relaunch every dead / idle agent
+coordinate	--zoom	attach with pane N zoomed: `--zoom N`
+background	--bg	start a long-running pane: `--bg <name> "<cmd>"`
+background	--bg-tail	read panel output: `--bg-tail <name> [--from N] [--follow]`
+background	--bg-list	list panels with status / RC: `--bg-list [--json]`
+background	--bg-kill	stop a running panel: `--bg-kill <name>`
+ship	--pr	push + open a PR for agent N: `--pr N "title" [--merge]`
+ship	--watch-pr	block until CI passes / fails for agent N's PR: `--watch-pr N`
+ship	--auto-merge	enable auto-merge on agent N's existing PR: `--auto-merge N`
+ship	--logs	tail combined agent logs: `--logs [N]`
+ship	--vscode	open agent N's worktree in VS Code: `--vscode N` (alias: `--code`)
+refused	--kill	tears down the session (refused while YAAMUX_AGENT_MODE=safe)
+refused	--clean	removes worktrees, incl. yours (refused while YAAMUX_AGENT_MODE=safe)
+refused	--install	host-level CLI install (refused while YAAMUX_AGENT_MODE=safe)
+refused	--uninstall	host-level CLI uninstall (refused while YAAMUX_AGENT_MODE=safe)
+refused	--install-service	macOS LaunchAgent install (refused while YAAMUX_AGENT_MODE=safe)
+setup	--init	scaffold AGENTS.md / .yaamux/config / skill (operator runs once per repo)
+setup	--update	pull a newer yaamux into ~/.yaamux
+setup	--add-docs	copy YAAMUX.md into the repo
+setup	--prepare-host	one-time mosh-server PATH fix on a Mac host
+setup	--ssh-config	emit an ssh config block for `--remote`
+setup	--setup-notify	configure push notifications
+setup	--agent-brief	this command itself (`--format text|markdown|json`)
+internal	--cpanel	control-panel TUI process (run inside the pane)
+internal	--panel-show	show the Control Panel pane
+internal	--panel-hide	hide the Control Panel pane
+internal	--toggle-panel	toggle the Control Panel pane
+internal	--cpanel-self-heal	repair a stuck Control Panel pane
+internal	--status-render	tmux status-right renderer
+internal	--goto	tmux-binding: jump to pane N
+internal	--sync	tmux-binding: toggle synchronize-panes
+internal	--attach	tmux attach (used by --connect output)
+internal	--auto-attach	device-aware attach (mosh:// entry point)
+internal	--mobile-attach	iOS-friendly attach with one pane zoomed
+internal	--mobile-grid	iPad-friendly multi-repo grid
+internal	--connect	print mosh / ssh snippets and optional QR
+internal	--remote	drive a session on another host (its own sub-CLI)
+internal	--remote-hosts	list configured remote-host aliases
+internal	--help	usage header
+internal	--code	alias for `--vscode`
+BRIEF_DATA
+}
+
+# Resolve the on-disk skill directory: git checkouts have it next to the
+# script; brew installs ship it under prefix/share/yaamux/skills.
+_skill_src() {
+  local candidate
+  for candidate in "${YAAMUX_HOME}/skills/yaamux" "${YAAMUX_HOME}/../share/yaamux/skills/yaamux"; do
+    if [[ -d "$candidate" ]]; then
+      echo "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+_brief_situational_markdown() {
+  local in_session=0
+  [[ -n "${YAAMUX_SESSION:-}" ]] && in_session=1
+  if [[ $in_session -eq 1 ]]; then
+    cat <<EOF
+You are running inside a yaamux session. Your situational context:
+
+- **Agent:** ${YAAMUX_AGENT_NAME:-?} (${YAAMUX_AGENT_NUMBER:-?}/${YAAMUX_AGENT_TOTAL:-?})
+- **Type:** ${YAAMUX_AGENT_TYPE:-?}
+- **Session:** ${YAAMUX_SESSION}
+- **Pane:** ${YAAMUX_PANE_ID:-?}
+- **Repo:** ${YAAMUX_REPO_ROOT:-?}
+- **Mode:** ${YAAMUX_AGENT_MODE:-unset}
+EOF
+  else
+    cat <<'EOF'
+No yaamux session detected in this shell ($YAAMUX_SESSION is unset). The
+command list below is still accurate; the situational fields would be
+populated if you were running inside an agent pane.
+EOF
+  fi
+}
+
+_brief_markdown() {
+  local version="${YAAMUX_VERSION:-}"
+  if [[ -z "$version" ]]; then
+    local c
+    for c in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+      [[ -f "$c" ]] && { version="$(cat "$c")"; break; }
+    done
+    version="${version:-dev}"
+  fi
+  printf '# yaamux agent brief (v%s)\n\n' "$version"
+  _brief_situational_markdown
+  printf '\n## Commands you can use\n'
+  local group flag summary prev_group=""
+  local heading
+  while IFS=$'\t' read -r group flag summary; do
+    [[ -z "$group" ]] && continue
+    case "$group" in
+      read|coordinate|background|ship) ;;
+      *) continue ;;
+    esac
+    if [[ "$group" != "$prev_group" ]]; then
+      case "$group" in
+        read)       heading="Read / inspect" ;;
+        coordinate) heading="Coordinate with siblings" ;;
+        background) heading="Background work (non-blocking)" ;;
+        ship)       heading="Ship" ;;
+      esac
+      printf '\n### %s\n' "$heading"
+      prev_group="$group"
+    fi
+    printf -- '- `yaamux %s` — %s\n' "$flag" "$summary"
+  done < <(_brief_data)
+  printf '\n## Do not run these (refused while YAAMUX_AGENT_MODE=safe)\n\n'
+  while IFS=$'\t' read -r group flag summary; do
+    [[ "$group" == "refused" ]] || continue
+    printf -- '- `yaamux %s` — %s\n' "$flag" "$summary"
+  done < <(_brief_data)
+  printf '\nFull reference: `yaamux --keys`.\n'
+}
+
+_brief_text() {
+  local version="${YAAMUX_VERSION:-}"
+  if [[ -z "$version" ]]; then
+    local c
+    for c in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+      [[ -f "$c" ]] && { version="$(cat "$c")"; break; }
+    done
+    version="${version:-dev}"
+  fi
+  printf 'yaamux agent brief (v%s)\n\n' "$version"
+  if [[ -n "${YAAMUX_SESSION:-}" ]]; then
+    printf 'Situational context:\n'
+    printf '  agent:    %s (%s/%s)\n' "${YAAMUX_AGENT_NAME:-?}" "${YAAMUX_AGENT_NUMBER:-?}" "${YAAMUX_AGENT_TOTAL:-?}"
+    printf '  type:     %s\n' "${YAAMUX_AGENT_TYPE:-?}"
+    printf '  session:  %s\n' "$YAAMUX_SESSION"
+    printf '  pane:     %s\n' "${YAAMUX_PANE_ID:-?}"
+    printf '  repo:     %s\n' "${YAAMUX_REPO_ROOT:-?}"
+    printf '  mode:     %s\n' "${YAAMUX_AGENT_MODE:-unset}"
+  else
+    printf 'No yaamux session detected in this shell (YAAMUX_SESSION is unset).\n'
+  fi
+  printf '\nCommands you can use:\n'
+  local group flag summary prev_group=""
+  while IFS=$'\t' read -r group flag summary; do
+    [[ -z "$group" ]] && continue
+    case "$group" in
+      read|coordinate|background|ship) ;;
+      *) continue ;;
+    esac
+    if [[ "$group" != "$prev_group" ]]; then
+      case "$group" in
+        read)       printf '\n  read / inspect:\n' ;;
+        coordinate) printf '\n  coordinate with siblings:\n' ;;
+        background) printf '\n  background work (non-blocking):\n' ;;
+        ship)       printf '\n  ship:\n' ;;
+      esac
+      prev_group="$group"
+    fi
+    printf '    yaamux %-20s  %s\n' "$flag" "$summary"
+  done < <(_brief_data)
+  printf '\n  do not run (refused while YAAMUX_AGENT_MODE=safe):\n'
+  while IFS=$'\t' read -r group flag summary; do
+    [[ "$group" == "refused" ]] || continue
+    printf '    yaamux %-20s  %s\n' "$flag" "$summary"
+  done < <(_brief_data)
+  printf '\nFull reference: yaamux --keys\n'
+}
+
+_brief_json() {
+  local version="${YAAMUX_VERSION:-}"
+  if [[ -z "$version" ]]; then
+    local c
+    for c in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+      [[ -f "$c" ]] && { version="$(cat "$c")"; break; }
+    done
+    version="${version:-dev}"
+  fi
+  # Pipe TSV + envelope vars to python for safe escaping. Exports (not the
+  # `VAR=val cmd` form) so the values reach python at the *end* of the pipe.
+  export YAAMUX_VERSION_PASS="$version"
+  export YAAMUX_AGENT_NAME_PASS="${YAAMUX_AGENT_NAME:-}"
+  export YAAMUX_AGENT_NUMBER_PASS="${YAAMUX_AGENT_NUMBER:-}"
+  export YAAMUX_AGENT_TOTAL_PASS="${YAAMUX_AGENT_TOTAL:-}"
+  export YAAMUX_AGENT_TYPE_PASS="${YAAMUX_AGENT_TYPE:-}"
+  export YAAMUX_SESSION_PASS="${YAAMUX_SESSION:-}"
+  export YAAMUX_PANE_ID_PASS="${YAAMUX_PANE_ID:-}"
+  export YAAMUX_REPO_ROOT_PASS="${YAAMUX_REPO_ROOT:-}"
+  export YAAMUX_AGENT_MODE_PASS="${YAAMUX_AGENT_MODE:-}"
+  _brief_data | python3 -c '
+import json, os, sys
+def maybe_int(s):
+    if s == "": return None
+    try: return int(s)
+    except ValueError: return s
+commands = []
+for line in sys.stdin.read().splitlines():
+    if not line: continue
+    parts = line.split("\t")
+    if len(parts) < 3: continue
+    group, flag, summary = parts[0], parts[1], parts[2]
+    if group in ("internal", "setup"): continue
+    commands.append({"group": group, "flag": flag, "summary": summary})
+out = {
+    "version": os.environ.get("YAAMUX_VERSION_PASS", ""),
+    "in_session": bool(os.environ.get("YAAMUX_SESSION_PASS", "")),
+    "agent": {
+        "name":      os.environ.get("YAAMUX_AGENT_NAME_PASS", "") or None,
+        "number":    maybe_int(os.environ.get("YAAMUX_AGENT_NUMBER_PASS", "")),
+        "total":     maybe_int(os.environ.get("YAAMUX_AGENT_TOTAL_PASS", "")),
+        "type":      os.environ.get("YAAMUX_AGENT_TYPE_PASS", "") or None,
+        "session":   os.environ.get("YAAMUX_SESSION_PASS", "") or None,
+        "pane_id":   os.environ.get("YAAMUX_PANE_ID_PASS", "") or None,
+        "repo_root": os.environ.get("YAAMUX_REPO_ROOT_PASS", "") or None,
+        "mode":      os.environ.get("YAAMUX_AGENT_MODE_PASS", "") or None,
+    },
+    "commands": commands,
+}
+print(json.dumps(out, indent=2))
+'
+}
+
+_emit_brief() {
+  local format="markdown"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format) format="${2:?--format needs value: markdown|text|json}"; shift 2 ;;
+      --format=*) format="${1#--format=}"; shift ;;
+      *) die "Unknown --agent-brief arg: $1 (try: --format markdown|text|json)" ;;
+    esac
+  done
+  case "$format" in
+    md|markdown) _brief_markdown ;;
+    txt|text)    _brief_text ;;
+    json)        _brief_json ;;
+    *) die "Unknown --agent-brief --format: $format (try: markdown|text|json)" ;;
+  esac
 }
 
 _remote_help() {
@@ -2288,15 +2682,36 @@ if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
   shift $# 2>/dev/null || true
 fi
 
+# ── Safe-mode guard ────────────────────────────────────────────────────────────
+# YAAMUX_AGENT_MODE=safe is set per-pane in the launch loop. Agents reading the
+# scaffolded AGENTS.md learn the CLI surface; this guard makes sure a curious
+# agent can't `--kill` its own session or `--clean --force` away its siblings.
+# The user's own shell outside the session sees no change since the var isn't
+# exported there.
+if [[ "${YAAMUX_AGENT_MODE:-}" == "safe" ]]; then
+  case "${1:-}" in
+    --kill|--clean|--uninstall|--install|--install-service)
+      die "Flag $1 is disabled in agent mode (YAAMUX_AGENT_MODE=safe). Ask the operator to run this from their own shell." ;;
+  esac
+fi
+
 # ── Flag commands ──────────────────────────────────────────────────────────────
 case "${1:-}" in
   --install)        _install_yaamux;        exit 0 ;;
   --update)         _update_yaamux;         exit 0 ;;
   --uninstall)      _uninstall_yaamux;      exit 0 ;;
   --add-docs)       _add_docs;            exit 0 ;;
-  --init)           _init_repo "${2:-}";    exit 0 ;;
+  --init)           shift; _init_repo "$@"; exit 0 ;;
   --version)        _show_version;          exit 0 ;;
   --keys)           _print_keys;            exit 0 ;;
+
+  # Agent brief — agent-optimized CLI summary (issue #29 Tier 2). Kept in lockstep
+  # with the case block via the _brief_data source-of-truth table; bats drift
+  # guard verifies every flag is catalogued.
+  --agent-brief)
+    shift
+    _emit_brief "$@"
+    exit 0 ;;
 
   # Control Panel — TUI pane that shows global state and runs commands by menu.
   --cpanel)
@@ -2374,16 +2789,19 @@ case "${1:-}" in
   --watch-pr)
     # Same disk-based convention as --pr: 0-based agent ordinal, independent
     # of tmux pane positions (so the Control Panel pane doesn't shift things).
-    IDX=$(( ${2:?Usage: yaamux --watch-pr N} - 1 ))
-    _watch_pr_pane "$IDX"; exit $? ;;
+    N_ARG="${2:?Usage: yaamux --watch-pr N}"
+    [[ "$N_ARG" =~ ^[1-9][0-9]*$ ]] || die "Usage: yaamux --watch-pr N (N must be a positive integer; got '${N_ARG}')"
+    _watch_pr_pane "$(( N_ARG - 1 ))"; exit $? ;;
 
   --auto-merge)
-    IDX=$(( ${2:?Usage: yaamux --auto-merge N} - 1 ))
-    _auto_merge_pane "$IDX"; exit $? ;;
+    N_ARG="${2:?Usage: yaamux --auto-merge N}"
+    [[ "$N_ARG" =~ ^[1-9][0-9]*$ ]] || die "Usage: yaamux --auto-merge N (N must be a positive integer; got '${N_ARG}')"
+    _auto_merge_pane "$(( N_ARG - 1 ))"; exit $? ;;
 
   --ci-status)
     if [[ -n "${2:-}" ]]; then
-      IDX=$(( $2 - 1 )); _ci_status_pane "$IDX"; exit $?
+      [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "Usage: yaamux --ci-status [N] (N must be a positive integer; got '$2')"
+      _ci_status_pane "$(( $2 - 1 ))"; exit $?
     else
       # No N — iterate every worktree on disk. Subshell isolates die() inside
       # _pane_pr so one missing PR doesn't abort the loop.
@@ -2396,8 +2814,9 @@ case "${1:-}" in
     fi ;;
 
   --diff)
-    IDX=$(( ${2:?Usage: yaamux --diff N} - 1 ))
-    _diff_pane "$IDX"; exit $? ;;
+    N_ARG="${2:?Usage: yaamux --diff N}"
+    [[ "$N_ARG" =~ ^[1-9][0-9]*$ ]] || die "Usage: yaamux --diff N (N must be a positive integer; got '${N_ARG}')"
+    _diff_pane "$(( N_ARG - 1 ))"; exit $? ;;
 
   --ssh-config)     _gen_ssh_config;      exit 0 ;;
   --install-service) _install_launchagent; exit 0 ;;
@@ -2824,7 +3243,7 @@ CONF
     exit 0 ;;
 
   --help|-h)
-    sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 
   "") : ;;
@@ -3038,7 +3457,11 @@ tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
   "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
 # Jump to the lazygit `git` window. Silent no-op if lazygit isn't installed
 # (the window doesn't exist).
-tmux bind-key      -T prefix G select-window -t "${SESSION}:git" 2>/dev/null || true
+# Only bind G if lazygit is available — otherwise the `git` window won't have
+# been created, and pressing G would show "can't find window: git" in tmux.
+if command -v lazygit &>/dev/null; then
+  tmux bind-key    -T prefix G select-window -t "${SESSION}:git" 2>/dev/null || true
+fi
 # Control Panel: prefix p toggles show/hide; remembers via .yaamux/state.
 tmux bind-key      -T prefix p run-shell -b "${SELF} --toggle-panel"
 # Ergonomic zoom toggle — Ctrl+Space → Space is a one-handed double-tap.
@@ -3199,6 +3622,25 @@ fi
 # has something to find.
 tmux set-window-option -t "${SESSION}:agents" remain-on-exit on
 
+# Resolve the version string once. We mirror _show_version's lookup (VERSION
+# file lives next to the script for git installs, under share/yaamux/ for brew).
+YAAMUX_VERSION_STR="dev"
+for _ver_candidate in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+  if [[ -f "$_ver_candidate" ]]; then
+    YAAMUX_VERSION_STR="$(cat "$_ver_candidate")"
+    break
+  fi
+done
+
+# Session-level env: inherited by any *new* shell spawned later in this session
+# (e.g. a manually-opened pane). The current agent shells are already alive so
+# we still need the per-pane export below — this just plugs the new-shell hole.
+tmux set-environment -t "$SESSION" YAAMUX_SESSION   "$SESSION"
+tmux set-environment -t "$SESSION" YAAMUX_REPO_ROOT "$REPO_ROOT"
+tmux set-environment -t "$SESSION" YAAMUX_VERSION   "$YAAMUX_VERSION_STR"
+tmux set-environment -t "$SESSION" YAAMUX_AGENT_MODE safe
+tmux set-environment -t "$SESSION" YAAMUX_AGENT_TOTAL "${#AGENTS[@]}"
+
 # ── Launch agents ──────────────────────────────────────────────────────────────
 for i in "${!AGENTS[@]}"; do
   agent="${AGENTS[$i]}"; type="${AGENT_TYPES[$i]}"
@@ -3212,7 +3654,16 @@ for i in "${!AGENTS[@]}"; do
   tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-type  "$type"
   tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-state "running"
   tmux pipe-pane   -t "${SESSION}:agents.${apidx}" -o "cat >> ${LOG_FILE}"
-  tmux send-keys   -t "${SESSION}:agents.${apidx}" "$(agent_cmd "$type" "$agent")" Enter
+  # Resolve the actual pane id so the agent's shell can quote itself in logs /
+  # send-keys to siblings. display-message reads the target pane's #{pane_id}.
+  apid="$(tmux display-message -p -t "${SESSION}:agents.${apidx}" '#{pane_id}' 2>/dev/null || echo '')"
+  # Export YAAMUX_* into the pane's shell, then launch the agent. The exports
+  # land in the live shell (so a Ctrl-C + manual relaunch still sees them) and,
+  # together with the session-level set-environment above, cover both the
+  # "current shell" and "new shell in this session" cases.
+  agent_invocation="$(agent_cmd "$type" "$agent")"
+  tmux send-keys -t "${SESSION}:agents.${apidx}" \
+    "export YAAMUX_AGENT_NAME='${agent}' YAAMUX_AGENT_NUMBER=$((i+1)) YAAMUX_AGENT_TOTAL=${#AGENTS[@]} YAAMUX_AGENT_TYPE='${type}' YAAMUX_SESSION='${SESSION}' YAAMUX_PANE_ID='${apid}' YAAMUX_REPO_ROOT='${REPO_ROOT}' YAAMUX_VERSION='${YAAMUX_VERSION_STR}' YAAMUX_AGENT_MODE=safe; clear; ${agent_invocation}" Enter
   tmux select-pane -t "${SESSION}:logs.${i}" -T "📋 ${agent}"
   tmux send-keys   -t "${SESSION}:logs.${i}" \
     "tail -f ${LOG_FILE} 2>/dev/null || { sleep 2; exec tail -f ${LOG_FILE}; }" Enter
