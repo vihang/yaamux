@@ -291,6 +291,59 @@ EOF
   [ "$(_remote_normalize_session yaamux-foo-bar)" = "yaamux-foo-bar" ]
 }
 
+# ── Pane health detector ──────────────────────────────────────────────────────
+
+@test "_pane_state: classifies dead / idle / running from tmux output" {
+  # Stub `tmux` via PATH to feed canned `display-message` output. The stub
+  # also handles `show-option @yaamux-shells` (returns the default set).
+  STUB_DIR="$(mktemp -d)"
+  cat > "$STUB_DIR/tmux" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "display-message -p")
+    # idx is the last arg of -t SESSION:agents.IDX; SCENARIO controls output
+    case "${SCENARIO:-}" in
+      dead)    echo "1|zsh" ;;
+      idle)    echo "0|zsh" ;;
+      running) echo "0|node" ;;
+      missing) exit 1 ;;
+    esac
+    ;;
+  "show-option -v")
+    echo "zsh bash sh fish dash ash"
+    ;;
+esac
+STUB
+  chmod +x "$STUB_DIR/tmux"
+  export PATH="$STUB_DIR:$PATH"
+  export SESSION="yaamux-test"
+  body="$(awk '/^_pane_state\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  SCENARIO=dead    [ "$(SCENARIO=dead _pane_state 0)" = "dead" ]
+  SCENARIO=idle    [ "$(SCENARIO=idle _pane_state 0)" = "idle" ]
+  SCENARIO=running [ "$(SCENARIO=running _pane_state 0)" = "running" ]
+  SCENARIO=missing [ "$(SCENARIO=missing _pane_state 0)" = "missing" ]
+  rm -rf "$STUB_DIR"
+}
+
+@test "--restart-dead on empty repo exits cleanly with 'no session' message" {
+  run_yaamux --restart-dead -y
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No session"* ]]
+}
+
+@test "--restart-current fails clearly outside tmux" {
+  unset TMUX_PANE
+  run_yaamux --restart-current
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No session"* || "$output" == *"TMUX_PANE"* ]]
+}
+
+@test "--refresh-states is a no-op on empty repo" {
+  run_yaamux --refresh-states
+  [ "$status" -eq 0 ]
+}
+
 @test "_REMOTE_SSH_OPTS: socket dir under \$HOME, has ControlMaster + 10m persist" {
   HOME_TMP="$(mktemp -d)"
   export HOME="$HOME_TMP"
