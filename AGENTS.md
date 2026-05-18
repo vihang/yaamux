@@ -29,6 +29,8 @@ git worktree, in a tiled tmux grid — manageable locally and remotely. It is
 | `README.md` | Install instructions for the yaamux repo | Yes — update on install-flow change |
 | `AGENTS.md` | This file — developer/agent guide (CLAUDE.md → symlink) | Yes — update on architecture change |
 | `VERSION` | Semver string read by `--version` | Yes — bump on release |
+| `skills/yaamux/SKILL.md` | Claude Code skill auto-symlinked by `--init` | Yes — keep recipes current; the drift-guard bats test only covers flags, not skill prose |
+| `Formula/yaamux.rb` | Homebrew formula (source of truth for the tap) | Yes — ship new top-level dirs (`skills/`) via `pkgshare.install` |
 | `tests/yaamux.bats` | bats-core integration test suite | Yes — keep current with new flags |
 | `.github/workflows/ci.yml` | CI: bash -n, heredoc check, shellcheck, bats | Yes — keep matrix in sync |
 
@@ -154,6 +156,46 @@ explicit instruction to do so.
     won't false-positive. Status is computed on-the-fly from the log; we
     do NOT mirror it into a stored field that could go stale.
 
+11. **Per-pane agent runtime env (`YAAMUX_*`).** The launch loop exports a
+    contract of variables into every agent pane: `YAAMUX_AGENT_NAME` /
+    `_NUMBER` / `_TOTAL` / `_TYPE` / `YAAMUX_SESSION` / `YAAMUX_PANE_ID` /
+    `YAAMUX_REPO_ROOT` / `YAAMUX_VERSION` / `YAAMUX_AGENT_MODE=safe`. This
+    is the discoverability surface for agents (issue #28 tier 1). Two
+    invariants follow:
+    - `REPO_ROOT="${YAAMUX_REPO_ROOT:-$(git rev-parse --show-toplevel ...)}"`
+      so an agent invoking yaamux from inside a worktree resolves
+      `PANELS_DIR` / `SESSION` to the *main* checkout, not the worktree.
+      Do not bypass this when adding new path-scoped state — read
+      `REPO_ROOT`, not `git rev-parse` directly.
+    - `YAAMUX_AGENT_MODE=safe` is checked above the flag `case` block and
+      refuses `--kill / --clean / --install / --uninstall /
+      --install-service`. When adding a new destructive flag, extend that
+      list. New non-destructive flags need no change.
+
+    `_restart_pane` re-exports the per-agent vars (NAME/NUMBER/TYPE/PANE_ID)
+    when relaunching, since the session-level `set-environment` covers only
+    new shells.
+
+12. **`_brief_data` is the source of truth for the CLI surface.** Issue #29
+    tier 2 introduces `yaamux --agent-brief [--format markdown|text|json]`,
+    backed by a single tab-separated table in the `_brief_data` function.
+    Every flag in the main `case "${1:-}"` block must have a row in that
+    table — either under an agent-facing group (`read`, `coordinate`,
+    `background`, `ship`, `refused`) which renders in the brief, or under
+    `setup` / `internal` which are catalogued but hidden. The bats
+    drift-guard test (`drift guard: every main-case flag is catalogued in
+    _brief_data`) fails CI if a new flag ships without an entry. When
+    adding a flag: pick its group based on whether an agent should
+    discover and run it.
+
+13. **Claude Code skill at `skills/yaamux/SKILL.md`.** Tracked in the repo;
+    `_init_repo` symlinks it into each repo's `.claude/skills/yaamux`.
+    `_skill_src` looks under `${YAAMUX_HOME}/skills/yaamux` (git installs)
+    then `${YAAMUX_HOME}/../share/yaamux/skills/yaamux` (brew). Adding a
+    new top-level dir like `skills/` means the brew Formula needs a
+    matching `pkgshare.install` line — verify both lookup paths resolve
+    after any reorg.
+
 ---
 
 ## Code map
@@ -163,10 +205,11 @@ The `yaamux` file is ordered top-to-bottom as:
 | Section | Responsibility |
 |---------|----------------|
 | Self-location | `SELF`, `YAAMUX_HOME` — resolve real path through the symlink |
-| Project context | `REPO_ROOT`, `SESSION`, `WORKTREES_BASE`, paths |
+| Project context | `REPO_ROOT` (honors `YAAMUX_REPO_ROOT` env override — see invariant #11), `SESSION`, `WORKTREES_BASE`, paths |
+| Agent brief | `_brief_data` / `_brief_markdown` / `_brief_text` / `_brief_json` / `_emit_brief` / `_skill_src` — back `--agent-brief` and the skill install (see invariants #12, #13) |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only agent-type switch |
-| `forge_*` helpers | `forge_provider` / `forge_bin` / `forge_pr_*` — the only git-host switch (PR/CI ops) |
+| `forge_*` helpers | `forge_url_hostname` / `forge_provider` / `forge_bin` / `forge_label` / `forge_create_pr` / `forge_view_pr` / `forge_pr_checks_watch` / `forge_merge_pr` / `forge_pr_ci_status` — the only git-host switch (PR/CI ops) |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
 | Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` / `_prepare_host_mosh` (host-level mosh-server PATH fix for `mosh://` URLs) |
 | Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |
@@ -175,8 +218,9 @@ The `yaamux` file is ordered top-to-bottom as:
 | Control Panel | `_cpanel_show` / `_cpanel_hide` / `_cpanel_toggle` / `_cpanel_self_heal` / `_save_panel_state` / `_status_render` / `_goto_pane` — back `--toggle-panel` / `--panel-show` / `--panel-hide` / `--cpanel` / `--status-render` / `--goto N` |
 | Background panels | `_bg_spawn` / `_bg_tail` / `_bg_list` / `_bg_kill` / `_bg_status` / `_bg_ensure_window` / `_bg_save_meta` / `_bg_read_meta` / `_bg_gen_token` / `_bg_validate_name` — back `--bg` / `--bg-tail` / `--bg-list` / `--bg-kill` |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
+| Safe-mode guard | `YAAMUX_AGENT_MODE=safe` check above the flag `case` — refuses destructive flags (see invariant #11) |
 | Flag `case` | All `--xxx` commands; each `exit 0`s |
-| Start sequence | preflight → hooks → worktrees → tmux build (incl. parity-based panel pane) → launch → attach |
+| Start sequence | preflight → hooks → worktrees → tmux build (incl. parity-based panel pane) → session-level `set-environment` → launch (exports per-pane `YAAMUX_*` env via send-keys) → attach |
 
 ---
 
@@ -190,7 +234,11 @@ The `yaamux` file is ordered top-to-bottom as:
 - User-facing strings: concise, lowercase-leaning, no emoji except the agent
   icons already defined.
 - When adding a flag: add it to the `case` block, the `--help` header comment
-  block (lines ~15–40), the summary footer if relevant, and `YAAMUX.md`.
+  block (lines ~15–40), the summary footer if relevant, `YAAMUX.md`, and
+  the `_brief_data` table (under the right group — `read` / `coordinate` /
+  `background` / `ship` / `refused` if agents should see it, or `setup` /
+  `internal` to acknowledge but hide it). The drift-guard bats test fails
+  CI if the table is missing the new flag.
 - When adding a tmux key binding (any new `tmux bind-key -T prefix …` line in
   the start sequence): also add a row to `_print_keys()` (`In-session keys`
   section) and to the shortcuts table in `YAAMUX.md`. The `Ctrl+Space + ?`
