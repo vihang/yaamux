@@ -1287,7 +1287,9 @@ print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
   run_yaamux --keys
   [ "$status" -eq 0 ]
   [[ "$output" == *"claude"* ]]
-  [[ "$output" == *"opencode"* || "$output" == *"--pilot-show"* ]]
+  # Must mention opencode explicitly — the earlier `|| --pilot-show` fallback
+  # would pass even if a regression dropped opencode entirely.
+  [[ "$output" == *"opencode"* ]]
 }
 
 @test "agent_bin maps opencode to the opencode binary" {

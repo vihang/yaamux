@@ -82,7 +82,7 @@ multiple repos simultaneously without collision.
 | `--panel-show` / `--panel-hide` | Explicit show/hide of the Control Panel pane |
 | `--pilot-toggle` | Flip the Control Panel pane between dashboard and pilot chat — see "Pilot mode" |
 | `--pilot-show [BACKEND]` / `--pilot-hide` | Explicit pilot enter/leave (BACKEND = claude / opencode / gemini / codex / copilot) |
-| `--pilot-backend BACKEND` | Persist the default pilot backend (clears stale resume id) |
+| `--pilot-backend BACKEND` | Persist the default pilot backend |
 | `--pilot-supported` | Print pilot backends installed locally |
 | `--goto N` | Focus the Nth agent pane (skips control-panel pane) |
 | `--bg <name> "<cmd>"` | Spawn a background panel running `<cmd>` — see "Background panels" |
@@ -632,10 +632,12 @@ literally from stdin instead — the pilot's prompt instructs it to use
 this form, so a pasted shell snippet in chat reaches the target agent
 verbatim.
 
-**Conversation memory.** Resume IDs are stored at
-`<repo>/.yaamux/pilot.state` keyed by `<backend>.<session>=<id>` — gitignored
-under `.yaamux/`. Toggling out and back in re-enters the same conversation
-when the backend supports it (claude: `--resume`, codex: `codex resume`).
+**Conversation memory.** Each toggle into the pilot starts a fresh
+conversation with the backend CLI — yaamux doesn't yet capture the
+backend's session id automatically, since the capture format differs
+per CLI and changes between releases. If you need a long-running
+conversation, keep the panel in pilot mode rather than toggling out
+and back in.
 
 **Backend caveats.** Each agent CLI changes its flag surface every few
 months. claude is the reference backend (system prompt, auto-shell, and

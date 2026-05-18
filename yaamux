@@ -68,7 +68,6 @@ NOTIF_LOG="${XDG_CACHE_HOME:-$HOME/.cache}/yaamux/notifications.log"
 PANEL_CONF_GLOBAL="${HOME}/.config/yaamux/control-panel.conf"
 PANEL_CONF_LOCAL="${REPO_ROOT}/.yaamux/state"
 PANELS_DIR="${REPO_ROOT}/.yaamux/panels"
-PILOT_STATE="${REPO_ROOT}/.yaamux/pilot.state"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 DEFAULT_AGENT="claude"
@@ -304,25 +303,26 @@ pilot_probe() {
 }
 
 # Compose the shell command that launches a pilot. Output is passed verbatim
-# to `tmux respawn-pane -k`, which runs it as a shell. If a resume-id has been
-# persisted for this <backend>.<session>, include it. Single-quote anything
+# to `tmux respawn-pane -k`, which runs it as a shell. Single-quote anything
 # that might contain spaces.
+#
+# Note on resume IDs: each backend's CLI has its own way of identifying a
+# prior conversation (claude `--resume`, codex `resume <id>`, etc.), but
+# capturing the id requires parsing the backend's first-output banner, which
+# differs per CLI and changes between releases. Until that's wired,
+# toggling out and back into the pilot starts a fresh conversation. The
+# `_save_pilot_state` helper exists for operators who want to manually
+# pin a resume id in `.yaamux/pilot.state`.
 pilot_cmd() {
-  local backend="$1" id flags
-  id="$(_read_pilot_state "${backend}.${SESSION}" 2>/dev/null || echo '')"
+  local backend="$1" flags
   [[ -f "$PILOT_PROMPT_FILE" ]] || _write_pilot_prompt
   case "$backend" in
     claude)
       flags="--append-system-prompt \"\$(cat '${PILOT_PROMPT_FILE}')\" --dangerously-skip-permissions"
-      [[ -n "$id" ]] && flags="${flags} --resume '${id}'"
       echo "claude ${flags}"
       ;;
     codex)
-      if [[ -n "$id" ]]; then
-        echo "codex resume '${id}' --full-auto"
-      else
-        echo "codex --full-auto"
-      fi
+      echo "codex --full-auto"
       ;;
     gemini)
       # GEMINI.md in cwd carries the orchestrator instructions; --yolo bypasses
@@ -342,12 +342,24 @@ pilot_cmd() {
   esac
 }
 
-# Pick the active pilot backend. Order: arg > env PILOT_BACKEND > first
-# installed of the default list. Echoes empty on nothing-installed.
+# Pick the active pilot backend. Order: arg > caller's PILOT_BACKEND env >
+# value persisted in `.yaamux/state` by --pilot-backend > first installed of
+# the default list. The per-repo state file is sourced here because pilot
+# flag handlers run in the case block, which is before the start-sequence
+# `source "$PANEL_CONF_LOCAL"` — so without this lookup, a value set by
+# `yaamux --pilot-backend foo` would never reach the next `--pilot-toggle`.
 _pilot_pick_backend() {
   local hint="${1:-}"
   if [[ -n "$hint" ]]; then echo "$hint"; return; fi
   if [[ -n "${PILOT_BACKEND:-}" ]]; then echo "$PILOT_BACKEND"; return; fi
+  if [[ -f "$PANEL_CONF_LOCAL" ]]; then
+    # _save_panel_state writes `KEY=value` lines unquoted, so cut -d= is enough;
+    # no quote-stripping needed.
+    local persisted
+    persisted="$(grep -E '^PILOT_BACKEND=' "$PANEL_CONF_LOCAL" 2>/dev/null \
+      | tail -1 | cut -d= -f2-)"
+    [[ -n "$persisted" ]] && { echo "$persisted"; return; }
+  fi
   local b
   for b in $PILOT_BACKENDS_DEFAULT; do
     pilot_probe "$b" && { echo "$b"; return; }
@@ -1349,34 +1361,20 @@ _cpanel_self_heal() {
   mode="$(tmux show-option -p -v -t "${SESSION}:agents.${idx}" @yaamux-panel-mode 2>/dev/null || echo dashboard)"
   # Pilot died (or cpanel crashed) → flip to dashboard so the panel isn't a
   # tombstone. Same path covers both: tmux respawn-pane -k revives the pane.
-  [[ "$mode" == "pilot" ]] && tmux set-option -p -t "${SESSION}:agents.${idx}" \
-    @yaamux-panel-mode dashboard 2>/dev/null || true
+  # When transitioning out of pilot mode, also clear the session-level
+  # @yaamux-pilot-active option and YAAMUX_PILOT_ACTIVE env so sibling
+  # agents don't keep seeing a "pilot active" signal after the orchestrator
+  # has exited (mirrors what _pilot_hide does for explicit toggles).
+  if [[ "$mode" == "pilot" ]]; then
+    tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-panel-mode dashboard 2>/dev/null || true
+    tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+    tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
+  fi
   tmux select-pane -t "${SESSION}:agents.${idx}" -T "🎛  control-panel" 2>/dev/null || true
   [[ -x "$CPANEL_SCRIPT" ]] || _write_cpanel
   tmux respawn-pane -k -t "${SESSION}:agents.${idx}" \
     "env YAAMUX_SELF='${SELF}' YAAMUX_SESSION='${SESSION}' YAAMUX_NOTIF_LOG='${NOTIF_LOG}' '${CPANEL_SCRIPT}'" \
     2>/dev/null || true
-}
-
-# Persist/look-up pilot resume IDs keyed by "<backend>.<session>". Atomic
-# write — same shape as _save_panel_state. Per-repo, gitignored under .yaamux/.
-_save_pilot_state() {
-  local key="$1" val="$2" dir tmp
-  dir="$(dirname "$PILOT_STATE")"
-  mkdir -p "$dir"
-  tmp="${PILOT_STATE}.tmp.$$"
-  if [[ -f "$PILOT_STATE" ]]; then
-    grep -v "^${key}=" "$PILOT_STATE" > "$tmp" 2>/dev/null || true
-  else
-    : > "$tmp"
-  fi
-  echo "${key}=${val}" >> "$tmp"
-  mv "$tmp" "$PILOT_STATE"
-}
-_read_pilot_state() {
-  local key="$1"
-  [[ -f "$PILOT_STATE" ]] || return 1
-  grep -E "^${key}=" "$PILOT_STATE" | tail -1 | cut -d= -f2-
 }
 
 # tmux display-popup y/N confirm. The popup runs in its own ephemeral tty so
@@ -2713,16 +2711,23 @@ _skill_src() {
   return 1
 }
 
-# Resolve YAAMUX_PILOT_ACTIVE. Process env wins (set inside the pilot's own
-# shell tree); otherwise fall back to the session-level tmux option. The
-# fallback matters for sibling agent shells that pre-date the toggle — their
-# inherited env is stale, but `tmux show-option` always reflects current truth.
+# Resolve YAAMUX_PILOT_ACTIVE.
+#
+# Precedence is intentionally NOT "env wins": a sibling agent's shell inherits
+# YAAMUX_PILOT_ACTIVE at spawn time, and if the operator later toggles the
+# pilot off, that stale env hangs around inside the agent's already-running
+# process tree forever. So:
+#
+#   * Inside the pilot's own shell (YAAMUX_AGENT_MODE=pilot), the env IS the
+#     current truth — we set it ourselves at respawn time.
+#   * Everywhere else (sibling agent panes, the user's shell), the tmux
+#     session option is canonical — _pilot_hide updates it atomically.
 _brief_pilot_active() {
-  if [[ -n "${YAAMUX_PILOT_ACTIVE:-}" ]]; then
+  [[ -n "${YAAMUX_SESSION:-}" ]] || { echo "${YAAMUX_PILOT_ACTIVE:-}"; return; }
+  if [[ "${YAAMUX_AGENT_MODE:-}" == "pilot" && -n "${YAAMUX_PILOT_ACTIVE:-}" ]]; then
     echo "${YAAMUX_PILOT_ACTIVE}"; return
   fi
-  [[ -n "${YAAMUX_SESSION:-}" ]] || return 0
-  command -v tmux >/dev/null 2>&1 || return 0
+  command -v tmux >/dev/null 2>&1 || { echo "${YAAMUX_PILOT_ACTIVE:-}"; return; }
   tmux show-option -v -t "${YAAMUX_SESSION}" @yaamux-pilot-active 2>/dev/null || true
 }
 
@@ -3110,11 +3115,6 @@ case "${1:-}" in
   --pilot-backend)
     NEW="${2:?Usage: yaamux --pilot-backend BACKEND}"
     _save_panel_state PILOT_BACKEND "$NEW"
-    # Clear any stale resume id for the previously-active backend in this
-    # session — different backend = different conversation thread.
-    [[ -f "$PILOT_STATE" ]] && \
-      grep -v "^[A-Za-z0-9_-]*\.${SESSION}=" "$PILOT_STATE" > "${PILOT_STATE}.tmp.$$" 2>/dev/null && \
-      mv "${PILOT_STATE}.tmp.$$" "$PILOT_STATE"
     log "Pilot backend set to '${NEW}'. Toggle with: yaamux --pilot-toggle"
     exit 0 ;;
   --pilot-supported) pilot_supported;         exit 0 ;;
@@ -3536,7 +3536,12 @@ case "${1:-}" in
   --send-stdin)
     N_ARG="${2:?Usage: printf '%s' \"<text>\" | yaamux --send-stdin N}"
     IDX="$(_agent_pane_idx "$N_ARG")" || die "agent $N_ARG not found."
-    PAYLOAD="$(cat)"
+    # Bash's `$(cat)` strips ALL trailing newlines, so a payload ending in
+    # `\n` (or several) would be silently truncated. The sentinel trick
+    # appends a literal `x`, then strips it off after the command
+    # substitution returns — preserving the exact stdin bytes.
+    PAYLOAD="$(cat; printf x)"
+    PAYLOAD="${PAYLOAD%x}"
     tmux send-keys -l -t "${SESSION}:agents.${IDX}" -- "$PAYLOAD"
     tmux send-keys -t "${SESSION}:agents.${IDX}" Enter
     AGENT_NAME="$(tmux show-option -p -v -t "${SESSION}:agents.${IDX}" @yaamux-agent 2>/dev/null || echo "agent-${N_ARG}")"
@@ -3577,7 +3582,11 @@ case "${1:-}" in
   # Heal-all: restart every pane whose state is not 'running'. -y skips
   # the confirm prompt (used by the `prefix R` keybinding).
   --restart-dead)
-    YES=false; [[ "${2:-}" == "-y" ]] && YES=true
+    # Positional `-y` is the legacy form (used by the `prefix R` binding's
+    # confirm-before chain). `--yes` is the global form pre-extracted into
+    # YAAMUX_YES — honor both so the pilot's --yes bypass path also works.
+    YES=false
+    [[ "${2:-}" == "-y" || "${YAAMUX_YES:-0}" == "1" ]] && YES=true
     tmux has-session -t "$SESSION" 2>/dev/null || { log "No session for ${PROJECT_NAME}."; exit 0; }
     _refresh_pane_states
     SHELLS="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"

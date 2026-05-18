@@ -98,8 +98,7 @@ explicit instruction to do so.
    `~/.config/yaamux/hosts.conf`, and `~/.config/yaamux/pilot-prompt.md`
    (the orchestrator system prompt, written once by `_write_pilot_prompt`);
    per-repo at `<repo>/.yaamux/config`, `<repo>/.yaamux/state`,
-   `<repo>/.yaamux/panels/<name>.{log,meta}`, and `<repo>/.yaamux/pilot.state`
-   (all gitignored).
+   and `<repo>/.yaamux/panels/<name>.{log,meta}` (all gitignored).
 
 3. **Session per repo.** `SESSION="yaamux-${PROJECT_NAME}"`. Never use a fixed
    session name — it would collide across repos.
@@ -234,7 +233,7 @@ The `yaamux` file is ordered top-to-bottom as:
 | Pane health | `_pane_state` / `_refresh_pane_states` / `_restart_pane` / `_triage_prompt` / `_remote_triage_prompt` — back `--restart-current` / `--restart-dead` / `--refresh-states` and the attach-time triage. All filter on `@yaamux-role` |
 | Pane addressing | `_agent_pane_idx N` (1-based agent → tmux `pane_index`), `_panel_pane_idx`, `_agent_count` — the canonical way to resolve "agent N" in a panel-aware layout |
 | Control Panel | `_cpanel_show` / `_cpanel_hide` / `_cpanel_toggle` / `_cpanel_self_heal` / `_save_panel_state` / `_status_render` / `_goto_pane` — back `--toggle-panel` / `--panel-show` / `--panel-hide` / `--cpanel` / `--status-render` / `--goto N` |
-| Pilot mode    | `_pilot_show` / `_pilot_hide` / `_pilot_toggle` / `_pilot_confirm` / `_pilot_gate` / `_save_pilot_state` / `_read_pilot_state` — back `--pilot-show` / `--pilot-hide` / `--pilot-toggle` / `--pilot-backend` / `--pilot-supported` and the popup-confirm gate on destructive flags when `YAAMUX_PILOT=1` |
+| Pilot mode    | `_pilot_show` / `_pilot_hide` / `_pilot_toggle` / `_pilot_confirm` / `_pilot_gate` / `_pilot_pick_backend` / `_brief_pilot_active` — back `--pilot-show` / `--pilot-hide` / `--pilot-toggle` / `--pilot-backend` / `--pilot-supported` and the popup-confirm gate on destructive flags when `YAAMUX_PILOT=1` |
 | Background panels | `_bg_spawn` / `_bg_tail` / `_bg_list` / `_bg_kill` / `_bg_status` / `_bg_ensure_window` / `_bg_save_meta` / `_bg_read_meta` / `_bg_gen_token` / `_bg_validate_name` — back `--bg` / `--bg-tail` / `--bg-list` / `--bg-kill` |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
 | Safe-mode guard | `YAAMUX_AGENT_MODE=safe` check above the flag `case` — refuses destructive flags (see invariant #11) |
