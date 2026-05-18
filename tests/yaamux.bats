@@ -579,3 +579,217 @@ STUB
   YAAMUX_YOLO=1; [ "$(agent_flags gemini)" = "--yolo" ]
   YAAMUX_YOLO=0; [ "$(agent_flags gemini)" = "--approval-mode auto_edit" ]
 }
+
+# ── Control Panel ─────────────────────────────────────────────────────────────
+
+@test "--init writes .yaamux/state with control-panel defaults" {
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  [ -f .yaamux/state ]
+  grep -q "CONTROL_PANEL_VISIBLE=true" .yaamux/state
+  grep -q "CONTROL_PANEL_MODE=auto" .yaamux/state
+}
+
+@test "--init adds .yaamux/state to .gitignore" {
+  touch .gitignore
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -qxF ".yaamux/state" .gitignore
+}
+
+@test "--panel-hide writes CONTROL_PANEL_VISIBLE=false to .yaamux/state" {
+  run_yaamux --init
+  # Without a tmux session the panel functions return early but still persist.
+  run_yaamux --panel-hide
+  [ "$status" -eq 0 ]
+  grep -q "CONTROL_PANEL_VISIBLE=false" .yaamux/state
+}
+
+@test "--panel-show writes CONTROL_PANEL_VISIBLE=true to .yaamux/state" {
+  run_yaamux --init
+  # Toggle off then back on; expect the file to end at true.
+  run_yaamux --panel-hide
+  run_yaamux --panel-show
+  # The show path needs a session to create the pane, but the persistence
+  # call should not have flipped the bit away from the existing true default.
+  grep -q "CONTROL_PANEL_VISIBLE=true" .yaamux/state
+}
+
+@test "--goto without args exits non-zero (usage)" {
+  run_yaamux --goto
+  [ "$status" -ne 0 ]
+}
+
+@test "--status-render is silent without a session" {
+  run_yaamux --status-render
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "--keys lists the new Control Panel bindings" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"toggle Control Panel"* ]]
+  [[ "$output" == *"jump to agent pane N"* ]]
+  [[ "$output" == *"ergonomic alias for Z"* ]]
+}
+
+@test "--keys lists the new --toggle-panel / --goto CLI flags" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--toggle-panel"* ]]
+  [[ "$output" == *"--goto N"* ]]
+  [[ "$output" == *"--panel-show"* ]]
+  [[ "$output" == *"--panel-hide"* ]]
+}
+
+# ── 4 embedded heredocs extract cleanly ───────────────────────────────────────
+
+@test "all 4 embedded heredocs extract and pass bash -n" {
+  tmp="$(mktemp -d)"
+  python3 - "$YAAMUX_BIN" "$tmp" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+out = sys.argv[2]
+ok = True
+for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF', 'CPANEL_EOF'):
+    m = re.search(r"<<\s*'" + tag + r"'\s*\n(.*?)\n" + tag + r"\s*\n", src, re.S)
+    if m:
+        open(f"{out}/{tag}", "w").write(m.group(1))
+    else:
+        print(f"MISSING {tag}")
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+  [ "$?" -eq 0 ]
+  for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF CPANEL_EOF; do
+    [ -f "$tmp/$t" ]
+    bash -n "$tmp/$t"
+  done
+  rm -rf "$tmp"
+}
+
+# ── Background panels ─────────────────────────────────────────────────────────
+
+@test "--bg without args exits non-zero (usage)" {
+  run_yaamux --bg
+  [ "$status" -ne 0 ]
+}
+
+@test "--bg with name but no command exits non-zero (usage)" {
+  run_yaamux --bg my-panel
+  [ "$status" -ne 0 ]
+}
+
+@test "--bg with no session errors clearly" {
+  # No yaamux session is running in the test repo — should refuse politely.
+  # We use a fake-ish name so we don't accidentally collide with a real panel.
+  run_yaamux --bg test-no-session "echo hi"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No yaamux session"* || "$output" == *"session"* ]]
+}
+
+@test "--bg-list on empty repo: human prints 'No background panels'" {
+  run_yaamux --bg-list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No background panels"* ]]
+}
+
+@test "--bg-list --json on empty repo returns []" {
+  run_yaamux --bg-list --json
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+}
+
+@test "--bg-tail on a nonexistent panel errors" {
+  run_yaamux --bg-tail no-such-panel
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No such panel"* ]]
+}
+
+@test "--bg-kill without args exits non-zero (usage)" {
+  run_yaamux --bg-kill
+  [ "$status" -ne 0 ]
+}
+
+@test "--bg-kill on a nonexistent panel errors" {
+  run_yaamux --bg-kill no-such-panel
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No such panel"* ]]
+}
+
+@test "--bg rejects panel names with invalid characters" {
+  run_yaamux --bg 'bad/name' "echo hi"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must match"* || "$output" == *"name"* ]]
+}
+
+@test "_bg_status reports completion from a hand-built log" {
+  # Stand up a fake panel directory and assert _bg_status reads the sentinel.
+  mkdir -p "${TEST_REPO}/.yaamux/panels"
+  printf 'TOKEN=abc12345xyz0\nPANE_ID=%%99\nCMD=true\nSTARTED=2026-05-19T00:00:00Z\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.meta"
+  printf 'output line\n[[YAAMUX:PANEL:abc12345xyz0:DONE:RC=0]]\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.log"
+  run_yaamux --bg-list --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"name\": \"sample\""* ]]
+  [[ "$output" == *"\"status\": \"done\""* ]]
+  [[ "$output" == *"\"rc\": 0"* ]]
+}
+
+@test "_bg_status reports 'failed' from a non-zero RC sentinel" {
+  mkdir -p "${TEST_REPO}/.yaamux/panels"
+  printf 'TOKEN=def67890xyz9\nPANE_ID=%%88\nCMD=false\nSTARTED=2026-05-19T00:00:00Z\n' \
+    > "${TEST_REPO}/.yaamux/panels/fail.meta"
+  printf '[[YAAMUX:PANEL:def67890xyz9:DONE:RC=2]]\n' \
+    > "${TEST_REPO}/.yaamux/panels/fail.log"
+  run_yaamux --bg-list --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"status\": \"failed\""* ]]
+  [[ "$output" == *"\"rc\": 2"* ]]
+}
+
+@test "--bg-tail prints OFFSET and STATUS trailers from a hand-built log" {
+  mkdir -p "${TEST_REPO}/.yaamux/panels"
+  printf 'TOKEN=tok000111222\nPANE_ID=%%77\nCMD=true\nSTARTED=2026-05-19T00:00:00Z\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.meta"
+  printf 'hello\n[[YAAMUX:PANEL:tok000111222:DONE:RC=0]]\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.log"
+  run_yaamux --bg-tail sample
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hello"* ]]
+  [[ "$output" == *"OFFSET="* ]]
+  [[ "$output" == *"STATUS=done"* ]]
+  [[ "$output" == *"RC=0"* ]]
+}
+
+@test "--bg-tail --from skips initial bytes" {
+  mkdir -p "${TEST_REPO}/.yaamux/panels"
+  printf 'TOKEN=tok000111222\nPANE_ID=%%77\nCMD=true\nSTARTED=2026-05-19T00:00:00Z\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.meta"
+  printf 'AAAAAAAAAA\nBBBBBBBBBB\n[[YAAMUX:PANEL:tok000111222:DONE:RC=0]]\n' \
+    > "${TEST_REPO}/.yaamux/panels/sample.log"
+  run_yaamux --bg-tail sample --from 11
+  [ "$status" -eq 0 ]
+  # First 11 bytes ("AAAAAAAAAA\n") should not appear in output before the trailers
+  # We assert BBB does appear and the AAA prefix was suppressed:
+  [[ "$output" == *"BBBBBBBBBB"* ]]
+  [[ "$output" != *"AAAAAAAAAA"* ]]
+}
+
+@test "--keys lists the new bg CLI flags" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--bg "* ]]
+  [[ "$output" == *"--bg-tail"* ]]
+  [[ "$output" == *"--bg-list"* ]]
+  [[ "$output" == *"--bg-kill"* ]]
+}
+
+@test "--init adds .yaamux/panels/ to .gitignore" {
+  touch .gitignore
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -qxF ".yaamux/panels/" .gitignore
+}
