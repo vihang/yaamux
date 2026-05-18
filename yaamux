@@ -692,6 +692,24 @@ _uninstall_yaamux() {
   log "The yaamux repo at $YAAMUX_HOME and per-project .claude/ files are untouched."
 }
 
+# Locate mosh-server. Tries the caller's PATH first, then probes common
+# install dirs — `command -v` misses on a fresh Apple Silicon Homebrew
+# install if the user's `~/.zprofile` (which adds /opt/homebrew/bin)
+# hasn't been re-sourced in the current shell. Falling back to direct
+# probes lets `--prepare-host` succeed even then.
+_find_mosh_server() {
+  if command -v mosh-server &>/dev/null; then
+    command -v mosh-server
+    return 0
+  fi
+  local loc
+  for loc in /opt/homebrew/bin/mosh-server /usr/local/bin/mosh-server \
+             /usr/bin/mosh-server /opt/local/bin/mosh-server; do
+    [[ -x "$loc" ]] && { echo "$loc"; return 0; }
+  done
+  return 1
+}
+
 # Make mosh-server reachable from a bare `mosh user@host` — the form iOS
 # clients (Blink, Prompt 3, Termius) use when opening a `mosh://` URL.
 # Background: yaamux's QR code encodes `mosh://user@host` (not the full
@@ -704,29 +722,35 @@ _uninstall_yaamux() {
 # fix symlinks the real mosh-server into /usr/local/bin — which IS on
 # /etc/paths — so every mosh client just works. One-time, per host.
 # `--check` is read-only and exits non-zero if the fix would be needed.
+#
+# Test-only knobs (not documented for users):
+#   YAAMUX_PREPARE_HOST_TARGET  override the symlink destination
+#   YAAMUX_PREPARE_HOST_SUDO    override the privilege wrapper (set to ""
+#                               to run unprivileged against a writable
+#                               temp path under the user's HOME)
 _prepare_host_mosh() {
   local mode="${1:-apply}"
   case "$mode" in apply|--apply) mode=apply ;; --check|check) mode=check ;;
     *) die "Usage: yaamux --prepare-host [--check]" ;; esac
 
-  if ! command -v mosh-server &>/dev/null; then
-    if [[ "$mode" == check ]]; then
-      warn "mosh-server not installed on this host."
-      warn "Install with: ${BOLD}brew install mosh${NC}  (or your distro's package manager)"
-      return 1
-    fi
-    die "mosh-server not installed. Install with: brew install mosh"
-  fi
+  local target="${YAAMUX_PREPARE_HOST_TARGET:-/usr/local/bin/mosh-server}"
+  local sudo_cmd="${YAAMUX_PREPARE_HOST_SUDO-sudo}"
 
-  local actual target="/usr/local/bin/mosh-server"
-  actual="$(command -v mosh-server)"
-
-  # Already discoverable? Either /usr/local/bin/mosh-server is the real
-  # binary (Intel Homebrew, MacPorts in some configs), or someone has
-  # already created the symlink (us, or a previous fix). Either way, no-op.
+  # Already discoverable on ssh's non-interactive PATH? Either the
+  # binary lives there natively (Intel Homebrew, Linux distros), or a
+  # previous run/manual fix has symlinked it. Check this *before*
+  # `command -v` — the function's whole point is "make iOS mosh:// work
+  # regardless of the caller's PATH", so an already-fixed host should
+  # report cleanly even when this shell can't see mosh-server in PATH.
   if _mosh_server_on_default_path; then
-    local found="/usr/local/bin/mosh-server"
-    [[ -x "$found" ]] || found="/usr/bin/mosh-server"
+    local found
+    if [[ -n "${YAAMUX_PREPARE_HOST_TARGET:-}" ]]; then
+      found="$YAAMUX_PREPARE_HOST_TARGET"
+    elif [[ -x /usr/local/bin/mosh-server ]]; then
+      found="/usr/local/bin/mosh-server"
+    else
+      found="/usr/bin/mosh-server"
+    fi
     if [[ -L "$found" ]]; then
       log "mosh-server already symlinked: ${found} → $(readlink "$found")"
     else
@@ -736,7 +760,19 @@ _prepare_host_mosh() {
     return 0
   fi
 
-  # Need the fix. In check mode, just report.
+  # Need a real mosh-server binary to symlink. Probe both PATH and
+  # common install dirs (see _find_mosh_server for why the fallback).
+  local actual
+  if ! actual="$(_find_mosh_server)"; then
+    if [[ "$mode" == check ]]; then
+      warn "mosh-server not installed on this host."
+      warn "Install with: ${BOLD}brew install mosh${NC}  (or your distro's package manager)"
+      return 1
+    fi
+    die "mosh-server not installed. Install with: brew install mosh"
+  fi
+
+  # Fix would land. In check mode, just report.
   if [[ "$mode" == check ]]; then
     warn "mosh-server is at ${actual} — off ssh's non-interactive PATH."
     warn "iOS clients opening mosh://user@host (the QR code) will see 'NoMoshServerArgs'."
@@ -745,14 +781,16 @@ _prepare_host_mosh() {
   fi
 
   log "mosh-server is at ${actual} — off ssh's default PATH."
-  log "Will create symlink: ${target} → ${actual}  (needs sudo for /usr/local/bin)."
+  log "Will create symlink: ${target} → ${actual}  (needs sudo for ${target%/*})."
 
-  if [[ ! -d /usr/local/bin ]]; then
-    log "Creating /usr/local/bin (missing)..."
-    sudo mkdir -p /usr/local/bin || die "Failed to create /usr/local/bin"
+  local target_dir
+  target_dir="$(dirname "$target")"
+  if [[ ! -d "$target_dir" ]]; then
+    log "Creating ${target_dir} (missing)..."
+    $sudo_cmd mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
   fi
 
-  sudo ln -sf "$actual" "$target" || die "Failed to create ${target}"
+  $sudo_cmd ln -sf "$actual" "$target" || die "Failed to create ${target}"
   log "Done. ${target} → ${actual}"
   log "iOS clients opening mosh://user@host on this host will now find mosh-server."
 }
@@ -901,7 +939,14 @@ MOSH_SERVER_CMD="${REMOTE_PATH_PRELUDE}; exec mosh-server"
 # distro). /opt/homebrew/bin (Apple Silicon Homebrew) is NOT — so a fresh M-
 # series Mac with `brew install mosh` has mosh-server invisible to a bare
 # `mosh user@host` (the form iOS clients use when opening a `mosh://` URL).
+# YAAMUX_PREPARE_HOST_TARGET overrides the check for `--prepare-host`'s
+# bats tests (test-only knob — see _prepare_host_mosh).
 _mosh_server_on_default_path() {
+  local override="${YAAMUX_PREPARE_HOST_TARGET:-}"
+  if [[ -n "$override" ]]; then
+    [[ -x "$override" ]]
+    return $?
+  fi
   [[ -x /usr/local/bin/mosh-server ]] || [[ -x /usr/bin/mosh-server ]]
 }
 
