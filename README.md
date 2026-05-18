@@ -65,7 +65,7 @@ Installs both `yaamux` and the 3-char alias `ymx` — same script, same flags. T
 ```bash
 cd ~/your/repo
 ymx --init                 # scaffolds AGENTS.md + skill + .yaamux/config + .worktreeinclude
-ymx 4                      # 4 Claude agents · 4 worktrees · 1 tiled tmux grid
+ymx 3                      # 3 Claude agents · 3 worktrees · 1 tiled tmux grid + Control Panel
 ```
 
 You land in a session that looks like this:
@@ -84,6 +84,10 @@ You land in a session that looks like this:
 └─────────────────────────┴─────────────────────────┘
               session: yaamux-yourrepo
 ```
+
+> With odd N (1, 3, 5, …) the Control Panel tiles in as one more pane.
+> With even N (2, 4, …) it becomes a right-column sidebar so the agent
+> grid stays balanced. Override with `CONTROL_PANEL_MODE=tile|sidebar`.
 
 `Ctrl+Space + d` to detach — agents keep running. Reattach later with `ymx --attach`. List every yaamux session across every repo on this box with `ymx --list`.
 
@@ -173,7 +177,7 @@ ymx --ci-status 2            # one pane's CI status
 ymx --diff 2                 # diff agent 2's branch vs origin/main (delta)
 ```
 
-Diffs from any shell inside the session are auto-piped through `delta`; pagers use `bat`. No global gitconfig changes.
+If `delta` is installed, diffs from any shell inside the session are auto-piped through it; if `bat` is installed, it becomes the default pager. Both wirings are session-scoped (`tmux set-environment`) — no global gitconfig changes. Without them, you get plain `git diff` / `less` output.
 
 **Pluggable forge.** All flags route through a `forge_*` dispatch family — auto-detected from `git remote get-url origin`, or set `YAAMUX_FORGE=github|gitlab|gitea`. GitHub is fully wired; GitLab supports create + merge; Gitea supports create.
 
@@ -196,7 +200,7 @@ ymx --bg-tail watch                  # read so-far; learns OFFSET=12345
 ymx --bg-tail watch --from 12345     # resume from where you left off
 ymx --bg-tail build --follow         # block until done — prints STATUS=done RC=0
 ymx --bg-list                        # NAME STATUS RC PANE STARTED CMD
-ymx --bg-kill watch                  # SIGINT, then SIGKILL; log preserved
+ymx --bg-kill watch                  # Ctrl-C, then `tmux kill-pane` if still alive; log preserved
 ```
 
 Status flows: `running` → `done` (rc=0) · `failed` (rc≠0) · `killed` (rc=130). Detection is via a per-panel sentinel — no race even on commands that exit faster than the captured shell can attach.
@@ -575,7 +579,7 @@ yaamux checks everything on launch and prints the install command for anything m
 | `'<agent>' not found`                                      | Install the CLI, or change the agent type                                                        |
 | `command not found: yaamux`                                | `brew install vihang/tap/yaamux`, or `~/.yaamux/yaamux --install` + `~/.local/bin` on `PATH`     |
 | `gh CLI not found` (during `--pr`)                         | `brew install gh && gh auth login` (or `glab` / `tea` for GitLab / Gitea)                        |
-| Pilot says "no pilot backend installed"                    | Install `claude` (the wired backend), or pass `--pilot-show <backend>` explicitly                |
+| Pilot says "no pilot backend installed"                    | Install at least one supported backend (`claude` is the only one with orchestrator framing wired today; the others — `opencode` / `gemini` / `codex` / `copilot` — are accepted by `--pilot-show <backend>` but launch unprompted) |
 | Pilot popup never appears (destructive op silently aborts) | tmux 3.2+ required for `display-popup` — `tmux -V`                                               |
 | Worktree skipped by `--clean`                              | It has uncommitted/unpushed work — commit, push, or `--clean --force`                            |
 | `Ctrl+Space` does nothing                                  | Disable the macOS input-source shortcut                                                          |

@@ -171,7 +171,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + arrows | Move between panes |
 | `Ctrl+Space` + `Space` | Zoom / unzoom current pane (ergonomic alias for `Z`) |
 | `Ctrl+Space` + `Z` | Zoom / unzoom current pane |
-| `Ctrl+Space` + `W` | Window list (agents / remote-srv / logs) |
+| `Ctrl+Space` + `W` | Window list (agents / git / remote-srv / logs) |
 | `Ctrl+Space` + `[` | Enter scroll mode (`q` to exit, `/` to search) |
 | &nbsp;&nbsp;↳ `y` or `Enter` | (in scroll mode) Copy selection → system clipboard |
 | `Ctrl+Space` + `S` | Toggle sync mode |
