@@ -82,6 +82,11 @@ multiple repos simultaneously without collision.
 | `--install-service` | macOS LaunchAgent — auto-start this repo's agents on login |
 | `--remote <host> [args]` | Drive a remote host's yaamux sessions — see below |
 | `--remote-hosts` | List host aliases from `~/.config/yaamux/hosts.conf` |
+| `--auto-attach` | Attach with UI auto-picked by terminal width (iPhone / iPad / desktop) |
+| `--mobile-attach [repo] [pane]` | Attach with one pane zoomed (iPhone-friendly) |
+| `--mobile-grid` | Build the iPad umbrella session across every yaamux- session |
+| `--connect [--qr]` | Print exact connect commands (+ optional QR of the mosh snippet) |
+| `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
 The `--yolo` and `--link-env` modifiers combine with positional args
@@ -109,14 +114,20 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + arrows | Move between panes |
 | `Ctrl+Space` + `Z` | Zoom / unzoom current pane |
 | `Ctrl+Space` + `W` | Window list (agents / remote-srv / logs) |
-| `Ctrl+Space` + `[` | Scroll mode (`q` to exit) |
-| `Ctrl+Space` + `y` | Copy selection → system clipboard |
+| `Ctrl+Space` + `[` | Enter scroll mode (`q` to exit, `/` to search) |
+| &nbsp;&nbsp;↳ `y` or `Enter` | (in scroll mode) Copy selection → system clipboard |
 | `Ctrl+Space` + `S` | Toggle sync mode |
 | `Ctrl+Space` + `r` | Restart the agent in the current pane |
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `D` | Detach (agents keep running) |
+| `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
+| `Ctrl+Space` + `Q` | QR-code popup of the mosh snippet (needs `qrencode`) |
+| `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
+| `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
+
+Run `yaamux --keys` from any shell for the same cheat sheet (no tmux needed).
 
 > macOS: `Ctrl+Space` may be the input-source switcher. Disable it under
 > System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
@@ -142,7 +153,7 @@ ssh's non-interactive PATH). Use the form yaamux prints at launch — it bakes a
 `--server=` PATH prelude so it works everywhere:
 
 ```bash
-mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
      user@host -- tmux attach -t yaamux-<repo>
 ```
 
@@ -254,7 +265,7 @@ and desktop without thinking:
 Recommended Blink / Prompt 3 snippet body — works from any iOS device:
 
 ```bash
-mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
      user@host -- yaamux --auto-attach
 ```
 
@@ -293,7 +304,7 @@ yaamux --mobile-attach                # multi-session: prompts with picker
 Use as the body of a Blink Shell / Prompt 3 snippet for one-tap access:
 
 ```bash
-mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
      user@host -- yaamux --mobile-attach
 ```
 
@@ -317,7 +328,7 @@ yaamux --mobile-grid                  # umbrella across every running yaamux- se
 From Blink / Prompt 3 on iPad (mosh, sleep-safe):
 
 ```bash
-mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
      user@host -- yaamux --mobile-grid
 ```
 

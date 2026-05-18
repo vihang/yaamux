@@ -27,7 +27,7 @@
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
 #    yaamux --connect [--qr]            # print/QR the exact commands to attach from any device
-#    yaamux --init | --install | --update | --uninstall | --add-docs | --version
+#    yaamux --init | --install | --update | --uninstall | --add-docs | --version | --keys
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
 #  Prefix: Ctrl+Space
@@ -1101,6 +1101,53 @@ _remote_hosts_show() {
   log "Use:    yaamux --remote <alias>"
 }
 
+_print_keys() {
+  cat << 'KEYS'
+yaamux — keyboard & command cheat sheet         prefix: Ctrl+Space
+
+In-session keys (press Ctrl+Space, then the key):
+
+  arrows       move between panes
+  Z            zoom / unzoom current pane
+  W            window list (agents / remote-srv / logs)
+  S            toggle sync mode (broadcast input to all panes)
+  [            enter scroll mode  (q exits, / searches)
+   ↳ y, Enter  (in scroll mode) copy selection → system clipboard
+  r            restart the agent in the current pane
+  R            restart every dead / idle agent (confirms)
+  L            clear screen + scrollback (fixes a garbled pane)
+  D            detach (agents keep running)
+  C            connect-commands popup (mosh / ssh / --remote lines)
+  Q            QR-code popup of the mosh snippet (needs qrencode)
+  ?            this cheat sheet
+  /            list all tmux key bindings
+  Mouse click  focus a pane
+
+yaamux CLI (from any shell inside the repo):
+
+  yaamux --attach                   re-attach to this session
+  yaamux --auto-attach              attach with UI auto-picked by terminal width
+  yaamux --mobile-attach [repo]     attach with one pane zoomed (iPhone)
+  yaamux --mobile-grid              multi-repo umbrella, mouse on (iPad)
+  yaamux --connect [--qr]           print connect commands (+ optional QR)
+  yaamux --list [--json]            list all yaamux sessions
+  yaamux --status                   per-pane health snapshot
+  yaamux --send N "text"            send text to pane N (1-based)
+  yaamux --broadcast "text"         send to every pane
+  yaamux --exec N "cmd"             run shell command in pane N
+  yaamux --restart N                relaunch the agent in pane N
+  yaamux --restart-dead [-y]        restart every dead / idle agent
+  yaamux --zoom N                   attach with pane N zoomed
+  yaamux --vscode N                 open pane N's worktree in VS Code
+  yaamux --logs                     tail combined agent logs
+  yaamux --pr N [title] [--merge]   push + open PR for pane N
+  yaamux --kill                     kill this session
+  yaamux --clean [--force]          remove worktrees (--force = dirty too)
+  yaamux --remote <host>            pick + attach to a remote session
+  yaamux --remote-hosts             list saved host aliases
+KEYS
+}
+
 _remote_help() {
   cat << HELP
 yaamux --remote — operate on yaamux sessions over SSH
@@ -1242,6 +1289,7 @@ case "${1:-}" in
   --add-docs)       _add_docs;            exit 0 ;;
   --init)           _init_repo "${2:-}";    exit 0 ;;
   --version)        _show_version;          exit 0 ;;
+  --keys)           _print_keys;            exit 0 ;;
 
   --list)
     fmt="human"; [[ "${2:-}" == "--json" ]] && fmt="json"
@@ -1344,7 +1392,9 @@ case "${1:-}" in
         if tmux has-session -t "$SESSION" 2>/dev/null; then
           exec tmux attach -t "$SESSION"
         fi
-        mapfile -t _aa_list < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
+        # Bash 3.2-safe: `mapfile` is Bash 4+, stock macOS still ships 3.2.
+        _aa_list=(); while IFS= read -r _aa_s; do _aa_list+=("$_aa_s"); done \
+          < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
         case "${#_aa_list[@]}" in
           0) die "No yaamux sessions running. Start one with: yaamux" ;;
           1) exec tmux attach -t "${_aa_list[0]}" ;;
@@ -1374,7 +1424,8 @@ case "${1:-}" in
     _ma_sess="${1:-}" _ma_pane="${2:-0}"
     case "$_ma_pane" in ''|*[!0-9]*) die "PANE must be a non-negative integer, got: ${_ma_pane}" ;; esac
     if [[ -z "$_ma_sess" ]]; then
-      mapfile -t _ma_list < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
+      _ma_list=(); while IFS= read -r _ma_s; do _ma_list+=("$_ma_s"); done \
+        < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
       case "${#_ma_list[@]}" in
         0) die "No yaamux sessions running. Start one with: yaamux" ;;
         1) _ma_sess="${_ma_list[0]}" ;;
@@ -1416,11 +1467,22 @@ case "${1:-}" in
     # from window-status-format on the umbrella.  The user option also bleeds
     # back to the source window but is custom-keyed and read by nothing else.
     shift
-    mapfile -t _mg_list < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
+    _mg_list=(); while IFS= read -r _mg_s; do _mg_list+=("$_mg_s"); done \
+      < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
     [[ ${#_mg_list[@]} -gt 0 ]] || die "No yaamux sessions running. Start at least one with: yaamux"
     _mg_umbrella="mobile-grid"
-    tmux kill-session -t "$_mg_umbrella" 2>/dev/null || true
+    # Only tear down a pre-existing `mobile-grid` if it's *ours* (carries the
+    # @yaamux-mobile-grid marker option).  Refuse to clobber an unrelated user
+    # session that happens to share the name.
+    if tmux has-session -t "$_mg_umbrella" 2>/dev/null; then
+      if [[ "$(tmux show-options -v -t "$_mg_umbrella" @yaamux-mobile-grid 2>/dev/null)" == "1" ]]; then
+        tmux kill-session -t "$_mg_umbrella" 2>/dev/null || true
+      else
+        die "A tmux session named '${_mg_umbrella}' already exists and was not created by yaamux. Rename or kill it first."
+      fi
+    fi
     tmux new-session -d -s "$_mg_umbrella" -n "init"
+    tmux set-option -t "$_mg_umbrella" @yaamux-mobile-grid 1
     _mg_linked=0
     for _mg_sess in "${_mg_list[@]}"; do
       _mg_label="${_mg_sess#yaamux-}"
@@ -1782,12 +1844,18 @@ tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
 tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
   "run-shell -b '${SELF} --restart-dead -y'"
 tmux bind-key      -T prefix L send-keys C-l \; clear-history
+# display-popup requires tmux 3.2+; suppress bind failure on older tmux so
+# session startup still succeeds (the popups just won't be available there;
+# `yaamux --keys` / `yaamux --connect` still work from any shell).
+tmux bind-key      -T prefix '?' display-popup -E -w 88 -h 40 \
+  "'${SELF}' --keys | less -R" 2>/dev/null || true
+tmux bind-key      -T prefix '/' list-keys
 # Connect info: prefix C → text popup, prefix Q → QR-code popup (if qrencode installed).
 # `read` keeps the popup open until the user dismisses with Enter.
 tmux bind-key      -T prefix C display-popup -E -w '90%' -h '70%' \
-  "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _"
+  "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
 tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
-  "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _"
+  "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
 tmux set-option    -t "$SESSION" mouse on
 tmux set-option    -t "$SESSION" monitor-activity on
 tmux set-option    -t "$SESSION" visual-activity off
@@ -1805,7 +1873,7 @@ tmux set-option    -t "$SESSION" status-left-length 120
 # @yaamux-state on every status interval. The actual text after the refresh
 # is just the agent count + clock; the side-effect is the value.
 tmux set-option    -t "$SESSION" status-right \
-  "#(${SELF} --refresh-states >/dev/null 2>&1; echo)#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+Z zoom"
+  "#(${SELF} --refresh-states >/dev/null 2>&1; echo)#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+? help"
 tmux set-option    -t "$SESSION" window-status-current-style  "bg=colour27 fg=white bold"
 tmux set-option    -t "$SESSION" window-status-activity-style "bg=colour130 fg=white bold"
 tmux set-option    -t "$SESSION" pane-active-border-style "fg=colour46"

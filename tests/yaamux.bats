@@ -26,6 +26,62 @@ teardown() {
   [[ "$output" == *"yaamux"*"Agents Multiplexer"* ]]
 }
 
+@test "--keys prints cheat sheet with prefix and CLI sections" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ctrl+Space"* ]]
+  [[ "$output" == *"yaamux CLI"* ]]
+  [[ "$output" == *"--broadcast"* ]]
+}
+
+# ── iOS attach flags (--mobile-attach / --mobile-grid / --auto-attach / --connect)
+
+@test "--mobile-attach errors cleanly when no yaamux sessions are running" {
+  run_yaamux --mobile-attach
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No yaamux sessions running"* ]]
+}
+
+@test "--mobile-attach rejects non-numeric PANE" {
+  run_yaamux --mobile-attach myrepo abc
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PANE must be a non-negative integer"* ]]
+}
+
+@test "--mobile-grid errors cleanly when no yaamux sessions are running" {
+  run_yaamux --mobile-grid
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No yaamux sessions running"* ]]
+}
+
+@test "--auto-attach rejects an invalid YAAMUX_ATTACH_MODE" {
+  YAAMUX_ATTACH_MODE=bogus run_yaamux --auto-attach
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid YAAMUX_ATTACH_MODE"* ]]
+}
+
+@test "--auto-attach forced to zoom routes to --mobile-attach (no sessions error)" {
+  YAAMUX_ATTACH_MODE=zoom run_yaamux --auto-attach
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No yaamux sessions running"* ]]
+}
+
+@test "--connect prints mosh/ssh/remote commands and the auto-attach entry point" {
+  run_yaamux --connect
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yaamux connect"* ]]
+  [[ "$output" == *"mosh --server="* ]]
+  [[ "$output" == *"yaamux --auto-attach"* ]]
+  [[ "$output" == *"yaamux --remote"* ]]
+}
+
+@test "--connect --qr without qrencode falls back to a hint, not an error" {
+  # Stub PATH so qrencode is unreachable even if installed.
+  PATH=/usr/bin:/bin run_yaamux --connect --qr
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"qrencode"* ]]
+}
+
 @test "--list with no sessions reports empty (human)" {
   run_yaamux --list
   [ "$status" -eq 0 ]
