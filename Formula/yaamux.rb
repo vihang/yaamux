@@ -18,7 +18,8 @@ class Yaamux < Formula
   depends_on "tmux"
   depends_on "git"
   depends_on "python@3"
-  depends_on "mosh"   # for `--remote --mosh` and the mobile-attach deep link
+  depends_on "mosh"     # for `--remote --mosh` and the mobile-attach deep link
+  depends_on "qrencode" # for `--connect --qr` and the `Ctrl+Space Q` QR popup
 
   def install
     bin.install "yaamux"

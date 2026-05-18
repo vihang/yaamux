@@ -85,7 +85,7 @@ multiple repos simultaneously without collision.
 | `--auto-attach` | Attach with UI auto-picked by terminal width (iPhone / iPad / desktop) |
 | `--mobile-attach [repo] [pane]` | Attach with one pane zoomed (iPhone-friendly) |
 | `--mobile-grid` | Build the iPad umbrella session across every yaamux- session |
-| `--connect [--qr]` | Print exact connect commands (+ optional QR of the mosh snippet) |
+| `--connect [--qr]` | Print exact connect commands (+ optional QR encoding `mosh://user@host` for one-tap open in Blink / Prompt / Termius) |
 | `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
@@ -122,7 +122,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
-| `Ctrl+Space` + `Q` | QR-code popup of the mosh snippet (needs `qrencode`) |
+| `Ctrl+Space` + `Q` | QR popup encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
 | `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
 | `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
@@ -227,7 +227,8 @@ your host's yaamux sessions:
 
 ```bash
 yaamux --connect              # prints mosh / ssh / --remote commands for this host
-yaamux --connect --qr         # …plus an ANSI QR of the mosh snippet (brew install qrencode)
+yaamux --connect --qr         # …plus an ANSI QR encoding mosh://user@host — iOS Camera opens it
+                              #   in Blink / Prompt 3 / Termius with one tap (qrencode bundled by brew formula)
 ```
 
 Inside any running yaamux session, two prefix keybindings open a popup with the
@@ -236,7 +237,7 @@ same output — no need to drop to a shell:
 | Key | Shows |
 |-----|-------|
 | `Ctrl+Space C` | Connect commands (mosh, ssh, `--remote`) |
-| `Ctrl+Space Q` | QR code of the mosh snippet (requires `qrencode`) |
+| `Ctrl+Space Q` | QR encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
 
 `prefix Q` is the fastest way to onboard a phone: scan with the iOS Camera app,
 tap the result, paste into Blink Shell. The QR encodes the full
