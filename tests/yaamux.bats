@@ -889,3 +889,193 @@ PY
   cd "$main_repo"
   rm -rf "$alt_dir"
 }
+
+# ── Tier 2: --agent-brief + Claude Code skill (issue #29) ─────────────────────
+
+@test "--agent-brief default format is markdown with the version header" {
+  run_yaamux --agent-brief
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# yaamux agent brief"* ]]
+  [[ "$output" == *"## Commands you can use"* ]]
+  [[ "$output" == *"### Read / inspect"* ]]
+  [[ "$output" == *"### Coordinate with siblings"* ]]
+  [[ "$output" == *"### Background work"* ]]
+  [[ "$output" == *"### Ship"* ]]
+  [[ "$output" == *"## Do not run these"* ]]
+}
+
+@test "--agent-brief --format markdown lists every agent-facing flag" {
+  run_yaamux --agent-brief --format markdown
+  [ "$status" -eq 0 ]
+  for flag in --list --status --send --exec --bg --bg-tail --bg-list --bg-kill --pr --kill --clean; do
+    [[ "$output" == *"yaamux ${flag}"* ]] || { echo "missing: $flag"; false; }
+  done
+}
+
+@test "--agent-brief --format text emits plain (no markdown headers / backticks)" {
+  run_yaamux --agent-brief --format text
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yaamux agent brief"* ]]
+  [[ "$output" == *"yaamux --bg"* ]]
+  # No markdown heading lines
+  ! grep -q '^# ' <<< "$output"
+  ! grep -q '^## ' <<< "$output"
+}
+
+@test "--agent-brief --format json emits valid JSON with envelope keys" {
+  run_yaamux --agent-brief --format json
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert "version" in data
+assert "in_session" in data
+assert "agent" in data
+assert "commands" in data and isinstance(data["commands"], list) and len(data["commands"]) > 0
+# in_session false when YAAMUX_SESSION unset; agent fields null
+assert data["in_session"] is False
+assert data["agent"]["session"] is None
+# Every command has a flag, group, summary
+for c in data["commands"]:
+    assert {"flag", "group", "summary"} <= set(c.keys())
+    assert c["group"] in {"read", "coordinate", "background", "ship", "refused"}
+'
+}
+
+@test "--agent-brief --format json reflects YAAMUX_* env when set" {
+  YAAMUX_SESSION="yaamux-test" \
+  YAAMUX_AGENT_NAME="agent-3" \
+  YAAMUX_AGENT_NUMBER="3" \
+  YAAMUX_AGENT_TOTAL="4" \
+  YAAMUX_AGENT_TYPE="claude" \
+  YAAMUX_PANE_ID="%42" \
+  YAAMUX_REPO_ROOT="/tmp/repo" \
+  YAAMUX_AGENT_MODE="safe" \
+    run bash "$YAAMUX_BIN" --agent-brief --format json
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json, sys
+data = json.loads(sys.stdin.read())
+assert data["in_session"] is True
+a = data["agent"]
+assert a["name"] == "agent-3"
+assert a["number"] == 3
+assert a["total"] == 4
+assert a["type"] == "claude"
+assert a["session"] == "yaamux-test"
+assert a["pane_id"] == "%42"
+assert a["repo_root"] == "/tmp/repo"
+assert a["mode"] == "safe"
+'
+}
+
+@test "--agent-brief --format rejects unknown formats" {
+  run_yaamux --agent-brief --format bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown"* || "$output" == *"format"* ]]
+}
+
+@test "--keys lists --agent-brief" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--agent-brief"* ]]
+}
+
+# Drift guard: every flag in the main case block must appear in _brief_data,
+# so a new flag added without brief coverage fails CI before it ships.
+@test "drift guard: every main-case flag is catalogued in _brief_data" {
+  # Extract the data table.
+  brief_flags="$(bash "$YAAMUX_BIN" --agent-brief --format json | python3 -c '
+import json, sys
+print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
+')"
+  # _brief_data also contains setup + internal groups, hidden from --format json.
+  # Pull those directly out of the script for a complete catalog.
+  all_catalogued="$(awk '/^_brief_data\(\) \{/,/^}/' "$YAAMUX_BIN" \
+    | awk -F'\t' '/^(read|coordinate|background|ship|refused|setup|internal)\t/ {print $2}' \
+    | sort -u)"
+
+  # Extract every main case-arm flag from the script. The main case block
+  # starts at `^case "\${1:-}" in` and ends at `^esac`. Each line of the
+  # form `  --foo)` or `  --foo|--bar)` introduces one or more flags.
+  main_flags="$(awk '
+    /^case "\$\{1:-\}" in$/ {in_case=1; next}
+    in_case && /^esac$/ {exit}
+    in_case && /^  --[a-z-]+/ {
+      gsub(/^[[:space:]]+/, "")
+      # split off the trailing `)` or args
+      sub(/[) ].*$/, "")
+      n = split($0, parts, "|")
+      for (i=1; i<=n; i++) if (parts[i] ~ /^--/) print parts[i]
+    }
+  ' "$YAAMUX_BIN" | sort -u)"
+
+  [ -n "$main_flags" ]
+  [ -n "$all_catalogued" ]
+
+  # Each main-case flag must be in all_catalogued.
+  missing=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if ! grep -qxF -- "$f" <<< "$all_catalogued"; then
+      missing="${missing}${f}\n"
+    fi
+  done <<< "$main_flags"
+
+  if [[ -n "$missing" ]]; then
+    echo "Flags missing from _brief_data:"
+    printf '%b' "$missing"
+    false
+  fi
+}
+
+@test "--init creates .claude/skills/yaamux symlink to the skills source" {
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  [ -L .claude/skills/yaamux ]
+  # Symlink target resolves to a directory containing SKILL.md
+  [ -f .claude/skills/yaamux/SKILL.md ]
+  grep -q "^name: yaamux" .claude/skills/yaamux/SKILL.md
+}
+
+@test "--init --copy-skill vendors the skill (regular dir, not symlink)" {
+  run_yaamux --init --copy-skill
+  [ "$status" -eq 0 ]
+  [ ! -L .claude/skills/yaamux ]
+  [ -d .claude/skills/yaamux ]
+  [ -f .claude/skills/yaamux/SKILL.md ]
+  grep -q "^name: yaamux" .claude/skills/yaamux/SKILL.md
+}
+
+@test "--init is idempotent for the skill — does not clobber a user-edited copy" {
+  run_yaamux --init --copy-skill
+  [ "$status" -eq 0 ]
+  echo "USER EDIT" >> .claude/skills/yaamux/SKILL.md
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -q "USER EDIT" .claude/skills/yaamux/SKILL.md
+}
+
+@test "--init symlink path is gitignored; --copy-skill path is NOT gitignored" {
+  touch .gitignore
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -qxF ".claude/skills/yaamux" .gitignore
+
+  # Fresh repo for the copy-skill case.
+  cd /
+  rm -rf "$TEST_REPO"
+  setup_repo
+  touch .gitignore
+  run_yaamux --init --copy-skill
+  [ "$status" -eq 0 ]
+  ! grep -qxF ".claude/skills/yaamux" .gitignore
+}
+
+@test "skills/yaamux/SKILL.md is shipped in the repo with valid frontmatter" {
+  src="$(dirname "$YAAMUX_BIN")/skills/yaamux/SKILL.md"
+  [ -f "$src" ]
+  head -1 "$src" | grep -q "^---$"
+  grep -q "^name: yaamux" "$src"
+  grep -q "^description:" "$src"
+}

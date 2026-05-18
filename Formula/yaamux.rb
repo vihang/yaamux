@@ -26,11 +26,15 @@ class Yaamux < Formula
     bin.install_symlink bin/"yaamux" => "ymx"   # 3-char alias
     doc.install "YAAMUX.md", "README.md", "AGENTS.md"
     pkgshare.install "VERSION"
+    # Claude Code skill — `yaamux --init` symlinks this into each repo's
+    # .claude/skills/yaamux/. Lookup order in _skill_src mirrors VERSION.
+    pkgshare.install "skills"
   end
 
   test do
     assert_match "yaamux #{version}", shell_output("#{bin}/yaamux --version")
     assert_match "yaamux #{version}", shell_output("#{bin}/ymx --version")
     assert_match "Agents Multiplexer", shell_output("#{bin}/yaamux --help")
+    assert_match "yaamux agent brief", shell_output("#{bin}/yaamux --agent-brief")
   end
 end
