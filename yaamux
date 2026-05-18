@@ -700,6 +700,17 @@ _init_repo() {
 # expanded by the remote shell.
 REMOTE_PATH_PRELUDE='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"'
 
+# Common ssh options reused by every remote call.  ConnectTimeout caps the
+# wait on unreachable hosts.  ControlMaster shares one auth across the list,
+# pick and attach calls in a single `yaamux --remote` invocation — so a
+# password (if used) is typed once instead of per ssh call.
+_REMOTE_SSH_OPTS=(
+  -o ConnectTimeout=10
+  -o ControlMaster=auto
+  -o "ControlPath=${TMPDIR:-/tmp}/yaamux-ssh-%r@%h:%p"
+  -o ControlPersist=60s
+)
+
 # Resolve an alias from ${HOSTS_CONF} to a real ssh target.
 # Format:  <alias>  <ssh-target>   (whitespace-separated; '#' comments allowed)
 # If no match, the input is returned untouched (assumed to be a ssh target).
@@ -725,7 +736,7 @@ _remote_resolve_host() {
 # distinguish "no sessions" from "tmux unavailable".
 _remote_list_raw() {
   local target="$1"
-  ssh -o ConnectTimeout=10 -- "$target" "${REMOTE_PATH_PRELUDE}"'
+  ssh "${_REMOTE_SSH_OPTS[@]}" -- "$target" "${REMOTE_PATH_PRELUDE}"'
 command -v tmux >/dev/null 2>&1 || { echo "tmux not found on remote" >&2; exit 127; }
 tmux list-sessions -F "#{session_name}|#{session_attached}" 2>/dev/null | while IFS="|" read -r n a; do
   case "$n" in yaamux-*) ;; *) continue;; esac
@@ -823,12 +834,20 @@ _remote_normalize_session() {
 
 # Attach to a remote session.  Optional zoom_idx (0-based) zooms one pane on attach.
 # Honors YAAMUX_USE_MOSH=1 to use mosh instead of ssh -t.
+#
+# Override TERM to a universally-known value (xterm-256color by default) before
+# tmux runs, so terminals whose terminfo isn't on the remote (e.g. ghostty,
+# kitty, wezterm) don't fail with "missing or unsuitable terminal: …".
+# Set YAAMUX_REMOTE_TERM to override (e.g. if you've installed the terminal's
+# terminfo on the remote and want full feature parity).
 _remote_attach() {
   local target="$1" session="$2" zoom_idx="${3:-}"
   case "$session" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name: ${session}" ;; esac
-  local remote_cmd="${REMOTE_PATH_PRELUDE}; tmux attach -t '${session}'"
+  local term="${YAAMUX_REMOTE_TERM:-xterm-256color}"
+  case "$term" in [A-Za-z0-9._-]*) ;; *) die "YAAMUX_REMOTE_TERM has unsafe chars: ${term}" ;; esac
+  local remote_cmd="${REMOTE_PATH_PRELUDE}; TERM=${term} tmux attach -t '${session}'"
   if [[ -n "$zoom_idx" ]]; then
-    remote_cmd="${REMOTE_PATH_PRELUDE}; tmux select-window -t '${session}:agents' \\; \
+    remote_cmd="${REMOTE_PATH_PRELUDE}; TERM=${term} tmux select-window -t '${session}:agents' \\; \
 select-pane -t '${session}:agents.${zoom_idx}' \\; \
 resize-pane -t '${session}:agents.${zoom_idx}' -Z \\; \
 attach -t '${session}'"
@@ -840,7 +859,7 @@ attach -t '${session}'"
     exec mosh "$target" -- sh -lc "$remote_cmd"
   fi
   log "ssh -t ${target} → ${session}"
-  exec ssh -t -- "$target" "$remote_cmd"
+  exec ssh "${_REMOTE_SSH_OPTS[@]}" -t -- "$target" "$remote_cmd"
 }
 
 # Show & explain the hosts.conf file.
@@ -939,7 +958,7 @@ _remote_dispatch() {
       sess="$(_remote_normalize_session "$sess")"
       case "$sess" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name." ;; esac
       header "remote status: ${target} :: ${sess}"
-      ssh -o ConnectTimeout=10 -- "$target" "${REMOTE_PATH_PRELUDE}
+      ssh "${_REMOTE_SSH_OPTS[@]}" -- "$target" "${REMOTE_PATH_PRELUDE}
 tmux list-windows -t '${sess}' 2>/dev/null || echo '  (session not found)'
 echo
 tmux list-panes -t '${sess}:agents' -F '  pane #{pane_index}: #{pane_title}  dead=#{pane_dead}' 2>/dev/null || true

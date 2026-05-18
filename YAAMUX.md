@@ -157,6 +157,15 @@ the arg list (or set `YAAMUX_MOSH=1` in your shell rc to make mosh the default).
 Transport flags only affect attach/zoom — `--list` and `--status` are one-shot
 queries and always run over ssh.
 
+SSH calls share a connection via ControlMaster (socket under `$TMPDIR`, 60s
+persist), so a password (if used) is prompted once per `yaamux --remote`
+invocation rather than once per list/attach call.
+
+The remote tmux is invoked with `TERM=xterm-256color` so terminals whose own
+terminfo isn't installed on the remote (Ghostty, Kitty, WezTerm, …) don't fail
+with `missing or unsuitable terminal`. Override with `YAAMUX_REMOTE_TERM=…` if
+you've installed your terminal's terminfo on the remote and want full parity.
+
 #### Host aliases
 
 Save shortcuts in `~/.config/yaamux/hosts.conf` — one per line, whitespace-separated:
