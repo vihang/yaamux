@@ -113,39 +113,15 @@ where to put your change:
 
 ## 🔁 The development loop
 
-Run this after **every** edit to `yaamux`. It mirrors what CI runs:
+Run after every edit to `yaamux`. Five things, in order:
 
-```bash
-# 1. Syntax-check the main script
-bash -n yaamux
+1. `bash -n yaamux` — syntax-check the main script
+2. **Embedded-heredoc extract & lint** — see the canonical snippet in [AGENTS.md → Development loop](./AGENTS.md#development-loop)
+3. `shellcheck yaamux`
+4. `bats tests/yaamux.bats`
+5. Smoke test in a throwaway repo (`git init` → `yaamux 2` → `--status` → `--kill` → `--clean`)
 
-# 2. Syntax-check the 3 embedded heredoc scripts
-python3 - <<'PY'
-import re
-src = open('yaamux').read()
-for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF'):
-    m = re.search(r"<< '" + tag + r"'\n(.*?)\n" + tag + r"\n", src, re.S)
-    if m:
-        open('/tmp/' + tag, 'w').write(m.group(1))
-    else:
-        print('MISSING', tag)
-PY
-for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF; do bash -n /tmp/$t && echo "$t ok"; done
-
-# 3. Lint
-shellcheck yaamux
-
-# 4. Tests
-bats tests/yaamux.bats
-
-# 5. Smoke test in a throwaway repo
-mkdir -p /tmp/yaamux-smoke && cd /tmp/yaamux-smoke && git init -q \
-  && git commit -q --allow-empty -m init
-~/code/yaamux/yaamux 2 claude claude
-~/code/yaamux/yaamux --status
-~/code/yaamux/yaamux --kill
-~/code/yaamux/yaamux --clean
-```
+CI runs steps 1–4 — keeping the snippets in AGENTS.md as the single source of truth means they can't drift.
 
 Install deps once: `brew install shellcheck bats-core tmux` (mac) or
 `sudo apt-get install -y shellcheck bats tmux` (ubuntu).
@@ -167,7 +143,7 @@ This is the cleanest "small PR" — three functions, one map entry.
 4. **Update three docs:**
    - The valid-types list in [YAAMUX.md](./YAAMUX.md)
    - The agent icons line in [README.md](./README.md)
-   - The auto-accept table in YAAMUX.md
+   - The auto-accept table in **both** [YAAMUX.md](./YAAMUX.md) and [README.md](./README.md)
 5. **Add a bats test** that spawns 1 agent of that type and asserts pane title.
 6. **Run the dev loop above.**
 
@@ -259,39 +235,17 @@ If CI is red on a fresh PR, it's almost always one of:
 
 ---
 
-## ✅ Definition of done (checklist for your PR)
+## ✅ Definition of done
 
-Copy this into the PR description and tick what applies:
+The full PR checklist lives in [AGENTS.md → Definition of done](./AGENTS.md#definition-of-done-any-change). Keeping it in one place means it can't go stale here. Skim it before you open the PR, copy it into the PR body, and tick what applies.
 
-```
-- [ ] bash -n yaamux passes
-- [ ] All 3 embedded scripts extract and bash -n clean
-- [ ] shellcheck yaamux has no NEW findings
-- [ ] bats tests/yaamux.bats passes locally
-- [ ] Smoke-tested in a throwaway repo (start → status → kill → clean)
-- [ ] No invariant in AGENTS.md broken
-- [ ] YAAMUX.md updated if behavior/flags changed
-- [ ] README.md updated if user-facing surface changed
-- [ ] AGENTS.md updated if architecture changed
-- [ ] New tmux key binding? _print_keys() + YAAMUX.md table + README.md table
-- [ ] New bats test for the behavior (or PR notes why not)
-```
+The headline items: **dev-loop steps 1–4 pass**, no AGENTS.md invariant broken, docs updated in lockstep with behaviour (YAAMUX.md for flags, README.md for user-facing surface, both keybindings tables if you added one), and a bats test (or a one-line note on why a test isn't practical).
 
 ---
 
 ## ✍️ Conventions
 
-| Topic                | Rule                                                              |
-|----------------------|-------------------------------------------------------------------|
-| Internal functions   | Prefixed `_` (e.g., `_remote_attach`). Public-ish: `agent_*`.     |
-| Status output        | Use `log` / `warn` / `die` / `header` — never raw `echo`.         |
-| tmux targets         | Fully qualify: `"${SESSION}:window.pane"`.                        |
-| Indentation          | 2 spaces, no tabs.                                                |
-| Line length          | ~100 chars where practical.                                       |
-| User-facing strings  | Concise, lowercase-leaning. No emoji except defined agent icons.  |
-| Variable defaults    | `"${x:-}"` everywhere `x` might be unset (`set -u` is on).        |
-| Acceptable failure   | End the command with `\|\| true`.                                  |
-| Commit messages      | Imperative + scoped: `yaamux: add --foo flag`.                    |
+Follow the canonical [AGENTS.md → Conventions](./AGENTS.md#conventions) — internal functions prefixed `_`, status output via `log` / `warn` / `die` / `header` (never raw `echo`), fully-qualified tmux targets, 2-space indent, `"${x:-}"` everywhere `x` might be unset (`set -u` is on), and imperative-scoped commit messages like `yaamux: add --foo flag`.
 
 ---
 
