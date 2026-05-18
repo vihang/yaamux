@@ -70,7 +70,7 @@ multiple repos simultaneously without collision.
 | `--send N "x"` | Inject a prompt into pane N without attaching |
 | `--exec N "x" [timeout]` | Headless: send, poll for idle, return output (5min default) |
 | `--broadcast "x"` | Send the same prompt to every pane |
-| `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
+| `--pr N [title] [--merge]` | Push pane N's branch + open PR via the configured forge (`gh` / `glab` / `tea` — see `YAAMUX_FORGE` and the "Pluggable forge" section below) |
 | `--watch-pr N` | Watch CI for pane N's PR — blocks until pass / fail |
 | `--auto-merge N` | Enable auto-merge (squash) on pane N's existing PR |
 | `--ci-status [N]` | CI status table — one pane, or every pane that has a PR |
@@ -532,13 +532,15 @@ The config directory is gitignored by `yaamux --init`.
 
 ### Git-host operations from the CLI
 
-Four new flags wrap `gh` for common per-pane git-host operations. Each takes
-a 1-based agent number — they look up `agent-N` on disk (same convention as
-`--pr`), so they're independent of where any tmux pane sits.
+Four new flags wrap the **configured forge CLI** for common per-pane git-host
+operations. The CLI is whichever forge is selected by `forge_bin` (`gh` for
+github, `glab` for gitlab, `tea` for gitea — see "Pluggable forge" below).
+Each flag takes a 1-based agent number; they look up `agent-N` on disk (same
+convention as `--pr`), so they're independent of where any tmux pane sits.
 
 ```bash
-yaamux --watch-pr 2      # gh pr checks --watch — blocks until CI completes
-yaamux --auto-merge 2    # gh pr merge --squash --auto on the existing PR
+yaamux --watch-pr 2      # forge_pr_checks_watch — blocks until CI completes
+yaamux --auto-merge 2    # forge_merge_pr on the existing PR
 yaamux --ci-status       # table of CI checks for every pane that has a PR
 yaamux --ci-status 2     # CI checks for just pane 2's PR
 yaamux --diff 2          # git diff origin/main...HEAD piped through delta
@@ -558,12 +560,16 @@ filling in its case in each helper — no other call site touches a forge
 CLI directly. The forge is auto-detected from `git remote get-url origin`;
 override with `YAAMUX_FORGE`.
 
-| Forge  | CLI    | Detection regex                              | `--pr` create / merge | `--watch-pr` / `--ci-status` / `--auto-merge` (separate flag) |
-|--------|--------|----------------------------------------------|-----------------------|----------------------------------------------------------------|
-| github | `gh`   | `*github.com*`                               | ✓ working             | ✓ working                                                       |
-| gitlab | `glab` | `*gitlab.com*` / `*gitlab.*`                 | ✓ working             | ✗ TODO (Phase 1 follow-up)                                      |
-| gitea  | `tea`  | `*codeberg.org*` / `*gitea.com*` / `*gitea*` | partial (create only) | ✗ TODO (Phase 1 follow-up)                                      |
-| other  | —      | fallback                                     | ✗ unsupported         | ✗ unsupported                                                   |
+Detection is hostname-only (parsed by `forge_url_hostname` from the remote URL,
+ignoring path segments) so a github.com repo named `gitea-mirror` doesn't
+mis-route to `tea`. The patterns below are matched against the hostname:
+
+| Forge  | CLI    | Hostname patterns                                            | `--pr` create / merge | `--watch-pr` / `--ci-status` / `--auto-merge` (separate flag) |
+|--------|--------|--------------------------------------------------------------|-----------------------|----------------------------------------------------------------|
+| github | `gh`   | `github.com` · `*.github.com`                                | ✓ working             | ✓ working                                                       |
+| gitlab | `glab` | `gitlab.com` · `*.gitlab.com` · `gitlab.*`                   | ✓ working             | ✗ TODO (Phase 1 follow-up)                                      |
+| gitea  | `tea`  | `codeberg.org` · `gitea.com` · `*.codeberg.org` · `gitea.*`  | partial (create only) | ✗ TODO (Phase 1 follow-up)                                      |
+| other  | —      | fallback                                                     | ✗ unsupported         | ✗ unsupported                                                   |
 
 ```bash
 # Auto-detected (origin is a github.com URL → uses gh)

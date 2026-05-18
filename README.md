@@ -308,7 +308,7 @@ Run `ymx --keys` from any shell for the same cheat sheet — no tmux needed.
 | `ymx --zoom N` / `--vscode N`                       | Focus pane N / hand it to VS Code                                    |
 | `ymx --send N "x"` / `--broadcast "x"`              | Inject a prompt into one pane / every pane                           |
 | `ymx --exec N "x" [timeout]`                        | Headless: send, wait for idle, return output (default 5 min)         |
-| `ymx --pr N [title] [--merge]`                      | Push pane N's branch + open PR via `gh`                              |
+| `ymx --pr N [title] [--merge]`                      | Push pane N's branch + open PR via the configured forge (`gh` / `glab` / `tea` — see `YAAMUX_FORGE`) |
 | `ymx --watch-pr N` / `--auto-merge N`               | Watch CI / enable auto-merge on pane N's PR                          |
 | `ymx --ci-status [N]` / `--diff N`                  | CI status (one or all) / branch diff vs `origin/main` (delta)        |
 | `ymx --restart N` / `--restart-dead [-y]`           | Heal panes                                                           |
@@ -384,7 +384,7 @@ A `yaamux-guard.sh` hook blocks `rm -rf /`, `mkfs`, `dd of=/dev/…` etc. **for 
 
 `tmux` 3.2+ · `git` · `python3` · `curl` · at least one agent CLI (`claude`, `gemini`, `codex`, `copilot`).
 
-Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`, `lazygit`, `gh`, `git-delta`, `bat`. If you install via `--install` (git clone) instead, grab those yourself — yaamux degrades gracefully (the `git` window is skipped without `lazygit`; PR flags fail with a clear error without `gh`; diffs and file viewing fall back to plain output without `delta` / `bat`).
+Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`, `lazygit`, `gh`, `git-delta`, `bat`. If you install via `--install` (git clone) instead, grab those yourself — yaamux degrades gracefully (the `git` window is skipped without `lazygit`; PR flags fail with a clear error without the relevant forge CLI — `gh` for GitHub, `glab` for GitLab, `tea` for Gitea — auto-detected from `git remote get-url origin`, overridable with `YAAMUX_FORGE`; diffs and file viewing fall back to plain output without `delta` / `bat`).
 
 Always optional: `tailscale` (zero-config networking).
 

@@ -3369,11 +3369,18 @@ fi
 MOSH_OK=false
 command -v mosh &>/dev/null && MOSH_OK=true || warn "mosh not found — brew install mosh"
 # New-stack soft deps: warn but don't die. lazygit drives the `git` window;
-# gh backs the PR/CI flags; delta/bat polish diffs and file viewing in panes.
+# the forge CLI (gh / glab / tea — picked by forge_bin from the auto-detected
+# or YAAMUX_FORGE-overridden provider) backs the PR/CI flags; delta/bat polish
+# diffs and file viewing in panes.
 command -v lazygit &>/dev/null || warn "lazygit not found — \`git\` window will be skipped. (brew install lazygit)"
-command -v gh      &>/dev/null || warn "gh not found — --pr/--watch-pr/--auto-merge/--ci-status will fail. (brew install gh && gh auth login)"
-command -v delta   &>/dev/null || warn "git-delta not found — diffs will render plain. (brew install git-delta)"
-command -v bat     &>/dev/null || warn "bat not found — files will page through less. (brew install bat)"
+_forge_cli="$(forge_bin 2>/dev/null)"
+if [[ -n "${_forge_cli:-}" ]]; then
+  command -v "$_forge_cli" &>/dev/null || \
+    warn "${_forge_cli} not found — --pr/--watch-pr/--auto-merge/--ci-status will fail for $(forge_label). (brew install ${_forge_cli} && ${_forge_cli} auth login)"
+fi
+unset _forge_cli
+command -v delta &>/dev/null || warn "git-delta not found — diffs will render plain. (brew install git-delta)"
+command -v bat   &>/dev/null || warn "bat not found — files will page through less. (brew install bat)"
 # If mosh is installed but mosh-server isn't on ssh's non-interactive PATH,
 # iOS clients opening the QR'd `mosh://user@host` URL will hit NoMoshServerArgs.
 # This is the v0.1.8 trade-off: the URL scheme can't carry the --server= PATH
