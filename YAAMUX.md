@@ -82,6 +82,10 @@ multiple repos simultaneously without collision.
 | `--install-service` | macOS LaunchAgent — auto-start this repo's agents on login |
 | `--remote <host> [args]` | Drive a remote host's yaamux sessions — see below |
 | `--remote-hosts` | List host aliases from `~/.config/yaamux/hosts.conf` |
+| `--auto-attach` | Attach with UI auto-picked by terminal width (iPhone / iPad / desktop) |
+| `--mobile-attach [repo] [pane]` | Attach with one pane zoomed (iPhone-friendly) |
+| `--mobile-grid` | Build the iPad umbrella session across every yaamux- session |
+| `--connect [--qr]` | Print exact connect commands (+ optional QR of the mosh snippet) |
 | `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
@@ -117,6 +121,8 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `D` | Detach (agents keep running) |
+| `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
+| `Ctrl+Space` + `Q` | QR-code popup of the mosh snippet (needs `qrencode`) |
 | `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
 | `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
@@ -139,6 +145,20 @@ ssh  user@host -t 'tmux attach -t yaamux-<repo>'    # fallback
 
 `yaamux --ssh-config` writes a `Host yaamux` block to `~/.ssh/config`.
 mosh survives sleep, network drops, and LTE↔WiFi handoffs — ideal for phones.
+
+If plain `mosh` errors with **`NoMoshServerArgs - Did not find mosh server
+startup message`**, your remote ssh can't find `mosh-server` (typical on a
+stock macOS desktop — Homebrew installs to `/opt/homebrew/bin` which isn't on
+ssh's non-interactive PATH). Use the form yaamux prints at launch — it bakes a
+`--server=` PATH prelude so it works everywhere:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- tmux attach -t yaamux-<repo>
+```
+
+`yaamux --remote --mosh` and the line in yaamux's launch banner already use
+this form, so the copy-paste from yaamux's own output is the easiest path.
 
 ### Drive remote sessions with `--remote`
 
@@ -194,10 +214,148 @@ Then: `yaamux --remote work --list`, `yaamux --remote laptop --zoom 1`, etc.
 | App | Purpose |
 |-----|---------|
 | **Blink Shell** | Full terminal + mosh (one-time purchase) |
+| **Prompt 3** (Panic) | SSH + snippets (one-time purchase) |
 | **Code App** (thebaselab) | SSH + git + Monaco editor (free) |
 | **Claude app** | Drive Claude sessions — Code tab (free) |
 | **ntfy** | Push notifications (free) |
 | **Tailscale** | Zero-config networking (free) |
+
+### Show the connect commands (`--connect`, `prefix C`, QR)
+
+Anyone (you, a teammate, your phone) can copy the exact line they need to reach
+your host's yaamux sessions:
+
+```bash
+yaamux --connect              # prints mosh / ssh / --remote commands for this host
+yaamux --connect --qr         # …plus an ANSI QR of the mosh snippet (brew install qrencode)
+```
+
+Inside any running yaamux session, two prefix keybindings open a popup with the
+same output — no need to drop to a shell:
+
+| Key | Shows |
+|-----|-------|
+| `Ctrl+Space C` | Connect commands (mosh, ssh, `--remote`) |
+| `Ctrl+Space Q` | QR code of the mosh snippet (requires `qrencode`) |
+
+`prefix Q` is the fastest way to onboard a phone: scan with the iOS Camera app,
+tap the result, paste into Blink Shell. The QR encodes the full
+`mosh --server='…' user@host -- yaamux --auto-attach` line — so once scanned,
+the iPad/iPhone gets the right UI automatically (zoom on iPhone, grid on iPad,
+full grid on a tablet held in landscape with a tiny font).
+
+**Cross-device handoff from iPad/phone**: the popup bindings also work *inside*
+the iPad's mobile-grid and the iPhone's mob-`$$` sessions (those sessions set
+the `Ctrl+Space` prefix to match the yaamux defaults). So you can already be
+attached from your iPad, hit `Ctrl+Space Q`, and your phone scans the same QR
+to attach itself — or `Ctrl+Space C` to copy the line and AirDrop it.
+
+### One snippet for every device (`--auto-attach`)
+
+`yaamux --auto-attach` reads the client terminal's width and routes to the
+right UI — so a single Blink Shell / Prompt 3 snippet works on iPhone, iPad,
+and desktop without thinking:
+
+| Terminal width | Routes to | Best for |
+|---|---|---|
+| `< 100` cols | `--mobile-attach` (1 pane zoomed) | iPhone |
+| `100–179` cols | `--mobile-grid` (multi-repo grid, mouse on) | iPad 11" / 13" |
+| `≥ 180` cols | regular `tmux attach` (full grid) | desktop / laptop |
+
+Recommended Blink / Prompt 3 snippet body — works from any iOS device:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --auto-attach
+```
+
+`yaamux --remote <host>` from a laptop keeps doing bare `tmux attach` → full
+desktop experience, so the two paths give you what you'd expect without
+mode-juggling.
+
+Override the auto-pick when needed:
+
+```bash
+# Force a mode at the call site
+mosh ... -- env YAAMUX_ATTACH_MODE=zoom yaamux --auto-attach
+ssh -t user@host 'YAAMUX_ATTACH_MODE=grid yaamux --auto-attach'
+
+# Valid: zoom | grid | full | auto (default)
+```
+
+If you prefer the picker behavior explicitly, the underlying flags
+(`--mobile-attach`, `--mobile-grid`, `tmux attach -t yaamux-<repo>`) all still
+work directly.
+
+### iOS-friendly attach (`--mobile-attach`)
+
+A 4-pane tiled grid is unreadable on a phone. `yaamux --mobile-attach` spins up
+an ephemeral grouped tmux session with one pane zoomed, so the screen shows a
+single agent at a time — switch agents with `Ctrl+Space` + arrow keys, detach
+with `Ctrl+Space + D`.
+
+```bash
+yaamux --mobile-attach                # auto-pick the only yaamux- session
+yaamux --mobile-attach myapp          # attach to yaamux-myapp
+yaamux --mobile-attach myapp 2        # ...with pane 2 zoomed (0-based)
+yaamux --mobile-attach                # multi-session: prompts with picker
+```
+
+Use as the body of a Blink Shell / Prompt 3 snippet for one-tap access:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --mobile-attach
+```
+
+yaamux's launch banner prints this exact line — easiest to copy from there.
+Set up one snippet per repo with the repo name appended, or one generic snippet
+that uses the picker when several sessions are running.
+
+### iPad-friendly multi-repo grid (`--mobile-grid`)
+
+An iPad 11-inch (and larger) has the screen real estate for the full 2×2 agent
+grid, so the iPhone "force-zoom one pane" approach loses information.
+`yaamux --mobile-grid` builds a single umbrella tmux session with one window
+per running `yaamux-<repo>` (linked in via `tmux link-window` — they are the
+real agents windows, changes propagate live in both directions), `mouse on`
+for tap-to-focus, no forced zoom.
+
+```bash
+yaamux --mobile-grid                  # umbrella across every running yaamux- session
+```
+
+From Blink / Prompt 3 on iPad (mosh, sleep-safe):
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --mobile-grid
+```
+
+Navigation inside the umbrella:
+
+| Action | Keys / gesture |
+|--------|----------------|
+| Next / prev repo | `Ctrl+Space n` / `Ctrl+Space p` |
+| Focus an agent (within the current repo) | Tap (mouse on) or `Ctrl+Space` + arrows |
+| Zoom focused agent | `Ctrl+Space Z` |
+| Repo picker | `Ctrl+Space w` (tmux choose-window) |
+| Detach | `Ctrl+Space D` |
+
+The umbrella is named `mobile-grid` (no `yaamux-` prefix — won't show up in
+`--list` or the `--mobile-attach` picker) and is rebuilt fresh on every call,
+so just re-run `--mobile-grid` after starting new yaamux sessions to pick them
+up. Repo labels in the tab list come from a per-window `@yaamux-repo` user
+option (so the underlying window name stays `agents` and every other yaamux
+helper that targets `${SESSION}:agents` keeps working). Killing the umbrella
+leaves the underlying yaamux sessions untouched.
+
+Tradeoffs:
+- **Mouse mode** hijacks native iPad text selection inside panes. In Blink,
+  hold Option to fall back to native select; Prompt 3 has an equivalent
+  modifier in its keyboard preferences.
+- **Rebuild on session changes** — `--mobile-grid` snapshots the running
+  yaamux sessions at the time it's invoked. Re-run to refresh.
 
 ### Per-agent native remote
 
@@ -342,5 +500,6 @@ After first `yaamux N [...]` run:
 | Claude Remote Control fails | Unset `ANTHROPIC_API_KEY`; run `claude auth login` |
 | `Ctrl+Space` does nothing | Disable the macOS input-source shortcut |
 | mosh won't connect | Open UDP 60000-61000, or use Tailscale |
+| `NoMoshServerArgs` / mosh-server not found | Copy the `mosh --server='…' user@host -- …` line from yaamux's launch banner — it bakes the PATH fix in |
 | Session already running | `--attach` to join, or `--kill` then restart |
 | A pane died | `yaamux --restart N` |
