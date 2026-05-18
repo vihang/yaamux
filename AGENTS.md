@@ -46,14 +46,20 @@ After **every** edit to `yaamux`:
 bash -n yaamux
 
 # 2. Syntax-check the 3 embedded heredoc scripts (they ship inside yaamux)
+rm -f /tmp/{GUARD,NOTIFY,MOBILE}_EOF
 python3 - <<'PY'
-import re
+import re, sys
 src = open('yaamux').read()
-for tag in ('GUARD_EOF','NOTIFY_EOF','MOBILE_EOF'):
-    m = re.search(r"<< '"+tag+r"'\n(.*?)\n"+tag+r"\n", src, re.S)
-    open('/tmp/'+tag,'w').write(m.group(1)) if m else print('MISSING', tag)
+ok = True
+for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF'):
+    m = re.search(r"<<\s*'" + tag + r"'\s*\n(.*?)\n" + tag + r"\s*\n", src, re.S)
+    if m:
+        open('/tmp/' + tag, 'w').write(m.group(1))
+    else:
+        print('MISSING', tag); ok = False
+if not ok: sys.exit(1)
 PY
-for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF; do bash -n /tmp/$t && echo "$t ok"; done
+for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF; do [[ -f /tmp/$t ]] && bash -n /tmp/$t && echo "$t ok"; done
 
 # 3. Lint (install: brew install shellcheck)
 shellcheck yaamux

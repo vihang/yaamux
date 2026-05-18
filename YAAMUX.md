@@ -120,7 +120,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `r` | Restart the agent in the current pane |
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
-| `Ctrl+Space` + `D` | Detach (agents keep running) |
+| `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
 | `Ctrl+Space` + `Q` | QR-code popup of the mosh snippet (needs `qrencode`) |
 | `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
@@ -292,7 +292,7 @@ work directly.
 A 4-pane tiled grid is unreadable on a phone. `yaamux --mobile-attach` spins up
 an ephemeral grouped tmux session with one pane zoomed, so the screen shows a
 single agent at a time — switch agents with `Ctrl+Space` + arrow keys, detach
-with `Ctrl+Space + D`.
+with `Ctrl+Space + d`.
 
 ```bash
 yaamux --mobile-attach                # auto-pick the only yaamux- session
@@ -340,7 +340,7 @@ Navigation inside the umbrella:
 | Focus an agent (within the current repo) | Tap (mouse on) or `Ctrl+Space` + arrows |
 | Zoom focused agent | `Ctrl+Space Z` |
 | Repo picker | `Ctrl+Space w` (tmux choose-window) |
-| Detach | `Ctrl+Space D` |
+| Detach | `Ctrl+Space d` |
 
 The umbrella is named `mobile-grid` (no `yaamux-` prefix — won't show up in
 `--list` or the `--mobile-attach` picker) and is rebuilt fresh on every call,
