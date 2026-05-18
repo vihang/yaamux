@@ -579,12 +579,15 @@ _render_help() {
 }
 
 _count_agents() {
+  # `grep -c` ALREADY prints 0 on no matches but exits non-zero — so
+  # `|| echo 0` appended a second "0", producing a 2-line value that
+  # broke arithmetic comparisons in _dispatch. `|| true` is enough.
   tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-    | grep -cx 'agent' 2>/dev/null || echo 0
+    | grep -cx 'agent' 2>/dev/null || true
 }
 
 _count_sessions() {
-  _collect_sessions | grep -c '.' 2>/dev/null || echo 0
+  _collect_sessions | grep -c '.' 2>/dev/null || true
 }
 
 _session_name_at() {
@@ -627,10 +630,12 @@ _dispatch() {
     R) "$SELF_YAAMUX" --restart-dead -y >/dev/null 2>&1 || true ;;
     z) "$SELF_YAAMUX" --goto "$SEL_PANE" >/dev/null 2>&1
        tmux resize-pane -Z 2>/dev/null || true ;;
-    s) tmux set-window-option -t "${SESSION}:agents" synchronize-panes 2>/dev/null \
-         | awk '{print $2}' | grep -q on \
-         && tmux set-window-option -t "${SESSION}:agents" synchronize-panes off \
-         || tmux set-window-option -t "${SESSION}:agents" synchronize-panes on ;;
+    s) # show-option reads the value; set-option (no value) errors out.
+       if [[ "$(tmux show-window-option -v -t "${SESSION}:agents" synchronize-panes 2>/dev/null)" == "on" ]]; then
+         tmux set-window-option -t "${SESSION}:agents" synchronize-panes off 2>/dev/null || true
+       else
+         tmux set-window-option -t "${SESSION}:agents" synchronize-panes on 2>/dev/null || true
+       fi ;;
     h|q) "$SELF_YAAMUX" --panel-hide >/dev/null 2>&1 || true; exit 0 ;;
     \?) SHOW_HELP=$((1 - SHOW_HELP)) ;;
     *) : ;;
@@ -933,8 +938,12 @@ _panel_pane_idx() {
 # Count the number of agent panes (excluding the control-panel pane).
 _agent_count() {
   tmux has-session -t "$SESSION" 2>/dev/null || { echo 0; return; }
+  # `grep -c` always prints a count (including 0); `|| echo 0` would
+  # have appended a *second* line on no-match, producing "0\n0" which
+  # blows up the arithmetic comparisons in _cpanel_show. `|| true`
+  # is enough since grep already prints 0.
   tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-    | grep -cx 'agent' || echo 0
+    | grep -cx 'agent' || true
 }
 
 # Persist a KEY=value pair to the per-repo state file. Atomic via tmp+mv.
@@ -1151,6 +1160,8 @@ _bg_ensure_window() {
   tmux has-session -t "$SESSION" 2>/dev/null || return 1
   if ! tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx 'bg'; then
     tmux new-window -d -t "$SESSION" -n bg -c "$REPO_ROOT"
+    # Normalize pane-base-index (see comment in start sequence).
+    tmux set-window-option -t "${SESSION}:bg" pane-base-index 0 2>/dev/null || true
     tmux set-window-option -t "${SESSION}:bg" remain-on-exit on 2>/dev/null || true
     # First pane is a placeholder shell so the window exists even when
     # there are zero panels. Subsequent --bg invocations split off it.
@@ -1162,9 +1173,9 @@ _bg_ensure_window() {
 
 # Spawn a background panel.
 #   $1 — panel name
-#   $2 — command string (passed verbatim to bash -c)
+#   $2 — command string (passed verbatim to bash)
 _bg_spawn() {
-  local name="$1" cmd="$2" pane_id token log meta sentinel wrapper window
+  local name="$1" cmd="$2" pane_id token log meta sentinel inner window placeholder_id
   _bg_validate_name "$name" || return 1
   tmux has-session -t "$SESSION" 2>/dev/null || die "No yaamux session — start one with: yaamux"
   meta="$(_bg_meta_path "$name")"
@@ -1180,19 +1191,34 @@ _bg_spawn() {
   : > "$log"   # truncate
   token="$(_bg_gen_token)"
   sentinel="[[YAAMUX:PANEL:${token}:DONE:RC="
-  # Wrapper: run the user's command, capture RC, emit sentinel, drop to an
-  # interactive shell so the user can inspect the failure / rerun if needed.
-  # The sentinel goes to the controlling tty (which tmux captures via pipe-pane).
-  wrapper="bash -c $(printf '%q' "set -o pipefail; ${cmd}; rc=\$?; printf '\\n%s%d]]\\n' '${sentinel}' \"\$rc\"; exec bash -i") 2>&1"
   window="$(_bg_ensure_window)" || return 1
-  # Create the pane. If the placeholder is the only pane, replace it; otherwise
-  # split off the most-recent panel for a fresh tile slot.
-  tmux split-window -t "${SESSION}:${window}" -c "$REPO_ROOT" "$wrapper"
-  pane_id="$(tmux display-message -p -t "${SESSION}:${window}" '#{pane_id}')"
-  tmux select-pane -t "$pane_id" -T "🪟 ${name}" 2>/dev/null || true
+  # Always target the placeholder pane explicitly. Without an explicit target,
+  # tmux split-window splits whichever pane happens to be active in the bg
+  # window — after the first --bg call, that's the previous panel, and the
+  # tiled layout fragments unpredictably as we keep spawning.
+  placeholder_id="$(tmux list-panes -t "${SESSION}:${window}" -F '#{pane_id}|#{@yaamux-role}' 2>/dev/null \
+    | awk -F'|' '$2=="placeholder"{print $1; exit}')"
+  if [[ -z "$placeholder_id" ]]; then
+    # Defensive: placeholder is created by _bg_ensure_window; if it went
+    # missing, fall back to the window itself (tmux picks the active pane).
+    placeholder_id="${SESSION}:${window}"
+  fi
+  # Create the pane WITHOUT a command so we can attach pipe-pane FIRST.
+  # The old design did `split-window … "$wrapper"` and then `pipe-pane` —
+  # for fast-exit commands the sentinel could be emitted before the pipe
+  # attached, leaving the panel stuck in 'running' forever.
+  pane_id="$(tmux split-window -t "$placeholder_id" -P -F '#{pane_id}' -c "$REPO_ROOT" 2>/dev/null)"
+  [[ -z "$pane_id" ]] && die "split-window failed when creating bg panel '$name'."
   tmux set-option -p -t "$pane_id" @yaamux-role background 2>/dev/null || true
   tmux set-option -p -t "$pane_id" @yaamux-panel-name "$name" 2>/dev/null || true
+  tmux select-pane -t "$pane_id" -T "🪟 ${name}" 2>/dev/null || true
+  # Pipe-pane is now attached BEFORE the command runs — race window closed.
   tmux pipe-pane -t "$pane_id" -o "cat >> '${log}'"
+  # Send the wrapper to the pane's idle shell. Outer shell remains afterward
+  # for the user to inspect / rerun. set -o pipefail makes rc reflect any
+  # mid-pipeline failure in the user's command.
+  inner="set -o pipefail; ${cmd}; rc=\$?; printf '\\n%s%d]]\\n' '${sentinel}' \"\$rc\""
+  tmux send-keys -t "$pane_id" "$inner" Enter
   tmux select-layout -t "${SESSION}:${window}" tiled 2>/dev/null || true
   _bg_save_meta "$name" TOKEN   "$token"
   _bg_save_meta "$name" PANE_ID "$pane_id"
@@ -1360,9 +1386,11 @@ _list_sessions() {
       repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '')"
       # Count only @yaamux-role=agent panes; older sessions without the
       # marker fall back to total pane count (panel role wasn't a thing).
+      # `grep -c` prints 0 even on no matches — `|| true` (not `|| echo 0`)
+      # avoids emitting a second "0" that would later break `[[ -eq ]]`.
       agents="$(tmux list-panes -t "${name}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-        | grep -cx 'agent' 2>/dev/null || echo 0)"
-      [[ "$agents" -eq 0 ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+        | grep -cx 'agent' 2>/dev/null || true)"
+      [[ -z "$agents" || "$agents" == "0" ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
       att="false"; [[ "$attached" -gt 0 ]] && att="true"
       tsv+="${name}	${agents:-0}	${att}	${repo}"$'\n'
     done <<< "$sessions"
@@ -1384,8 +1412,8 @@ print(json.dumps(items, indent=2))
       [[ -z "$name" ]] && continue
       repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '?')"
       agents="$(tmux list-panes -t "${name}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-        | grep -cx 'agent' 2>/dev/null || echo 0)"
-      [[ "$agents" -eq 0 ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+        | grep -cx 'agent' 2>/dev/null || true)"
+      [[ -z "$agents" || "$agents" == "0" ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
       att_str="no"; [[ "$attached" -gt 0 ]] && att_str="yes"
       printf "%-30s %-8s %-10s %s\n" "$name" "${agents:-0}" "$att_str" "${repo:-?}"
     done <<< "$sessions"
@@ -2555,7 +2583,11 @@ case "${1:-}" in
     IDX="$(_agent_pane_idx "$N_ARG")" || die "agent $N_ARG not found."
     PROMPT="${3:?Usage: yaamux --send N \"prompt\"}"
     tmux send-keys -t "${SESSION}:agents.${IDX}" "$PROMPT" Enter
-    log "Sent to agent-${N_ARG}."; exit 0 ;;
+    # Read the resolved pane's @yaamux-agent for the log message — matches
+    # _restart_pane and stays accurate if ordinals and agent names ever
+    # diverge in a future layout mode.
+    AGENT_NAME="$(tmux show-option -p -v -t "${SESSION}:agents.${IDX}" @yaamux-agent 2>/dev/null || echo "agent-${N_ARG}")"
+    log "Sent to ${AGENT_NAME}."; exit 0 ;;
 
   --broadcast)
     PROMPT="${2:?Usage: yaamux --broadcast \"prompt\"}"
@@ -2823,6 +2855,13 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "agents" -c "${WORKTREES_BASE}/agent-1"
 
+# Normalize pane-base-index to 0 on yaamux's own windows so the `.0`/`.1`-style
+# pane targets used throughout the script hold regardless of the user's
+# ~/.tmux.conf (a user with `setw -g pane-base-index 1` would otherwise see
+# panel pane assignment land on the wrong pane).  Per-window scope means
+# the user's other tmux sessions are unaffected.
+tmux set-window-option -t "${SESSION}:agents" pane-base-index 0 2>/dev/null || true
+
 # Metadata (yaamux user-options — consumed by --list, --restart, etc.)
 tmux set-option -t "$SESSION" @yaamux-repo "$REPO_ROOT"
 # Shell set used by _pane_state to classify "agent exited, only shell left".
@@ -2973,10 +3012,12 @@ fi
 # remote-srv window (only if a Claude pane exists)
 if $HAS_CLAUDE; then
   tmux new-window -t "$SESSION" -n "remote-srv" -c "$REPO_ROOT"
+  tmux set-window-option -t "${SESSION}:remote-srv" pane-base-index 0 2>/dev/null || true
 fi
 
 # logs window — N panes tiled
 tmux new-window -t "$SESSION" -n "logs" -c "$LOG_DIR"
+tmux set-window-option -t "${SESSION}:logs" pane-base-index 0 2>/dev/null || true
 for ((i=1; i<N; i++)); do
   tmux split-window -t "${SESSION}:logs" -c "$LOG_DIR"
   tmux select-layout -t "${SESSION}:logs" tiled
