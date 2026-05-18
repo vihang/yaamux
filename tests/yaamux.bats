@@ -160,6 +160,137 @@ teardown() {
   [ "$(_layout_for 4 tiled)" = "tiled" ]
 }
 
+# ── --remote ──────────────────────────────────────────────────────────────────
+
+@test "--remote --help prints usage" {
+  run_yaamux --remote --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yaamux --remote"* ]]
+  [[ "$output" == *"Pick a session"* ]]
+  [[ "$output" == *"--mosh"* ]]
+}
+
+@test "--remote with no args prints help (not an error)" {
+  run_yaamux --remote
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--remote"* ]]
+}
+
+@test "--remote with unknown sub-flag fails with hint" {
+  run_yaamux --remote some-host --bogus-flag
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag"* ]]
+}
+
+@test "--remote --zoom rejects non-numeric pane" {
+  run_yaamux --remote some-host --zoom abc
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"numeric"* ]]
+}
+
+@test "--remote --zoom rejects 0 (must be 1-based)" {
+  run_yaamux --remote some-host --zoom 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"1-based"* ]]
+}
+
+@test "--remote rejects targets starting with '-' (option injection)" {
+  run_yaamux --remote -X-injected --list
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"starts with"* || "$output" == *"-X-injected"* ]]
+}
+
+@test "--remote transport flags can appear anywhere in arg list" {
+  # --mosh / --ssh must be stripped from the arg list before the sub-command
+  # is interpreted, regardless of position.  We verify by checking that an
+  # unknown sub-flag is still recognized (proving --mosh wasn't itself
+  # treated as the sub-command).
+  run_yaamux --remote --mosh some-host --bogus-flag
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+
+  run_yaamux --remote some-host --bogus-flag --mosh
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+
+  run_yaamux --remote some-host --ssh --bogus-flag
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown --remote sub-flag: --bogus-flag"* ]]
+}
+
+@test "_remote_resolve_host: last line without trailing newline is honored" {
+  HOME_TMP="$(mktemp -d)"
+  mkdir -p "$HOME_TMP/.config/yaamux"
+  # printf — no trailing newline
+  printf 'work    vihang@work.example\nlast    user@last.example' \
+    > "$HOME_TMP/.config/yaamux/hosts.conf"
+  export HOME="$HOME_TMP"
+  HOSTS_CONF="$HOME_TMP/.config/yaamux/hosts.conf"
+  body="$(awk '/^_remote_resolve_host\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$(_remote_resolve_host work)" = "vihang@work.example" ]
+  [ "$(_remote_resolve_host last)" = "user@last.example" ]
+  rm -rf "$HOME_TMP"
+}
+
+@test "--remote-hosts on empty config prints setup instructions" {
+  HOSTS_OVERRIDE="$(mktemp -d)/hosts.conf"
+  HOME_TMP="$(mktemp -d)"
+  HOME="$HOME_TMP" run_yaamux --remote-hosts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No alias file yet"* ]]
+  [[ "$output" == *"<alias>"* ]]
+  rm -rf "$HOME_TMP"
+}
+
+@test "--remote-hosts lists configured aliases" {
+  HOME_TMP="$(mktemp -d)"
+  mkdir -p "$HOME_TMP/.config/yaamux"
+  cat > "$HOME_TMP/.config/yaamux/hosts.conf" <<EOF
+# header comment
+work    vihang@work.example
+laptop  vihang@laptop.local  # inline comment
+
+phone   user@phone.example
+EOF
+  HOME="$HOME_TMP" run_yaamux --remote-hosts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"work"* ]]
+  [[ "$output" == *"vihang@work.example"* ]]
+  [[ "$output" == *"laptop"* ]]
+  [[ "$output" == *"phone"* ]]
+  # Inline-comment stripping should not include the comment text
+  [[ "$output" != *"inline comment"* ]]
+  rm -rf "$HOME_TMP"
+}
+
+@test "_remote_resolve_host: alias lookup + passthrough" {
+  HOME_TMP="$(mktemp -d)"
+  mkdir -p "$HOME_TMP/.config/yaamux"
+  cat > "$HOME_TMP/.config/yaamux/hosts.conf" <<EOF
+work    vihang@work.example
+laptop  vihang@laptop.local
+EOF
+  export HOME="$HOME_TMP"
+  HOSTS_CONF="$HOME_TMP/.config/yaamux/hosts.conf"
+  body="$(awk '/^_remote_resolve_host\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$(_remote_resolve_host work)" = "vihang@work.example" ]
+  [ "$(_remote_resolve_host laptop)" = "vihang@laptop.local" ]
+  [ "$(_remote_resolve_host missing)" = "missing" ]
+  [ "$(_remote_resolve_host user@bare.host)" = "user@bare.host" ]
+  [ "$(_remote_resolve_host '')" = "" ]
+  rm -rf "$HOME_TMP"
+}
+
+@test "_remote_normalize_session: bare repo gets yaamux- prefix" {
+  body="$(awk '/^_remote_normalize_session\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$(_remote_normalize_session myapp)" = "yaamux-myapp" ]
+  [ "$(_remote_normalize_session yaamux-myapp)" = "yaamux-myapp" ]
+  [ "$(_remote_normalize_session yaamux-foo-bar)" = "yaamux-foo-bar" ]
+}
+
 # ── YOLO mode ─────────────────────────────────────────────────────────────────
 
 @test "agent_flags picks YOLO when YAAMUX_YOLO=1" {

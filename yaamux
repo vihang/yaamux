@@ -24,6 +24,8 @@
 #    yaamux --zoom N | --vscode N | --send N "x" | --exec N "x" | --broadcast "x"
 #    yaamux --restart N | --logs | --sync | --pr N [title] [--merge]
 #    yaamux --setup-notify | --ssh-config | --install-service
+#    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
+#    yaamux --remote-hosts
 #    yaamux --init | --install | --update | --uninstall | --add-docs | --version
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
@@ -48,6 +50,7 @@ WORKTREES_BASE="${REPO_ROOT}/../${PROJECT_NAME}-worktrees"
 HOOKS_DIR="${REPO_ROOT}/.claude/hooks"
 LOG_DIR="${REPO_ROOT}/.claude/logs"
 NOTIFY_CONF="${HOME}/.config/yaamux/notify.conf"
+HOSTS_CONF="${HOME}/.config/yaamux/hosts.conf"
 MOBILE_ATTACH="${HOME}/.local/bin/yaamux-mobile-attach.sh"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
@@ -685,6 +688,274 @@ _init_repo() {
 }
 
 # =============================================================================
+#  Remote ops — `--remote <host>` operates on yaamux sessions over SSH
+# =============================================================================
+# Resolve an alias from ${HOSTS_CONF} to a real ssh target.
+# Format:  <alias>  <ssh-target>   (whitespace-separated; '#' comments allowed)
+# If no match, the input is returned untouched (assumed to be a ssh target).
+_remote_resolve_host() {
+  local name="$1"
+  [[ -z "$name" ]] && { echo ""; return; }
+  if [[ -f "$HOSTS_CONF" ]]; then
+    local line a t
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%%#*}"
+      [[ -z "${line// /}" ]] && continue
+      read -r a t <<< "$line"
+      if [[ "$a" == "$name" ]]; then echo "$t"; return; fi
+    done < "$HOSTS_CONF"
+  fi
+  echo "$name"
+}
+
+# Stream remote yaamux-* sessions as pipe-separated lines:
+#   <session>|<attached-count>|<agents-count>|<repo-path>
+# Uses raw tmux on the remote — no dependency on yaamux being on the remote PATH.
+# Exits non-zero (127) if tmux is missing on the remote, so callers can
+# distinguish "no sessions" from "tmux unavailable".
+_remote_list_raw() {
+  local target="$1"
+  ssh -o ConnectTimeout=10 -- "$target" '
+command -v tmux >/dev/null 2>&1 || { echo "tmux not found on remote" >&2; exit 127; }
+tmux list-sessions -F "#{session_name}|#{session_attached}" 2>/dev/null | while IFS="|" read -r n a; do
+  case "$n" in yaamux-*) ;; *) continue;; esac
+  ag=$(tmux list-panes -t "${n}:agents" 2>/dev/null | wc -l | tr -d " ")
+  rp=$(tmux show-option -v -t "$n" @yaamux-repo 2>/dev/null || echo "?")
+  echo "${n}|${a}|${ag:-0}|${rp}"
+done
+'
+}
+
+# Print remote session table (or JSON if format=json).
+_remote_print_list() {
+  local target="$1" format="${2:-human}"
+  local raw att rc=0
+  raw="$(_remote_list_raw "$target")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    [[ "$format" == "json" ]] && echo "[]"
+    die "SSH to ${target} failed (exit ${rc})."
+  fi
+  if [[ -z "$raw" ]]; then
+    [[ "$format" == "json" ]] && echo "[]" || log "No yaamux sessions on ${target}."
+    return
+  fi
+  if [[ "$format" == "json" ]]; then
+    printf '%s\n' "$raw" | python3 -c '
+import json, sys
+items=[]
+for line in sys.stdin.read().splitlines():
+  if not line: continue
+  p=line.split("|")
+  if len(p)<4: continue
+  items.append({"session":p[0],"attached":p[1] not in ("0",""),"agents":int(p[2] or 0),"repo":p[3]})
+print(json.dumps(items, indent=2))
+'
+    return
+  fi
+  printf "%-30s %-8s %-10s %s\n" "SESSION" "AGENTS" "ATTACHED" "REPO"
+  local n a ag rp
+  while IFS='|' read -r n a ag rp; do
+    [[ -z "$n" ]] && continue
+    att="no"; [[ "$a" =~ ^[0-9]+$ && "$a" -gt 0 ]] && att="yes"
+    printf "%-30s %-8s %-10s %s\n" "$n" "$ag" "$att" "$rp"
+  done <<< "$raw"
+}
+
+# Interactive picker.  Writes table+prompt to stderr; chosen session to stdout.
+# Returns 1 if no sessions or user cancels;  2 if SSH itself failed.
+_remote_pick_session() {
+  local target="$1"
+  local raw rc=0
+  raw="$(_remote_list_raw "$target")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    warn "SSH to ${target} failed (exit ${rc})." >&2
+    return 2
+  fi
+  if [[ -z "$raw" ]]; then
+    log "No yaamux sessions on ${target}." >&2
+    return 1
+  fi
+  local lines=()
+  while IFS= read -r line; do [[ -n "$line" ]] && lines+=("$line"); done <<< "$raw"
+  local count="${#lines[@]}"
+  if [[ "$count" -eq 1 ]]; then
+    local only="${lines[0]%%|*}"
+    log "Single session on ${target} — attaching to ${only}." >&2
+    echo "$only"
+    return 0
+  fi
+  echo "" >&2
+  echo "yaamux sessions on ${target}:" >&2
+  printf "  %-5s %-30s %-8s %-10s %s\n" "#" "SESSION" "AGENTS" "ATTACHED" "REPO" >&2
+  local i=1 n a ag rp att
+  for line in "${lines[@]}"; do
+    IFS='|' read -r n a ag rp <<< "$line"
+    att="no"; [[ "$a" =~ ^[0-9]+$ && "$a" -gt 0 ]] && att="yes"
+    printf "  [%-3s] %-30s %-8s %-10s %s\n" "$i" "$n" "$ag" "$att" "$rp" >&2
+    i=$((i+1))
+  done
+  echo "" >&2
+  local pick
+  read -rp "Pick session [1-${count}, q to quit]: " pick
+  [[ -z "$pick" || "$pick" == "q" || "$pick" == "Q" ]] && return 1
+  if ! [[ "$pick" =~ ^[0-9]+$ ]] || [[ "$pick" -lt 1 ]] || [[ "$pick" -gt "$count" ]]; then
+    warn "Invalid choice." >&2
+    return 1
+  fi
+  echo "${lines[$((pick-1))]%%|*}"
+}
+
+# Bare repo name → yaamux-<repo>;  pass-through if already prefixed.
+_remote_normalize_session() {
+  local s="$1"
+  [[ "$s" == yaamux-* ]] && echo "$s" || echo "yaamux-${s}"
+}
+
+# Attach to a remote session.  Optional zoom_idx (0-based) zooms one pane on attach.
+# Honors YAAMUX_USE_MOSH=1 to use mosh instead of ssh -t.
+_remote_attach() {
+  local target="$1" session="$2" zoom_idx="${3:-}"
+  case "$session" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name: ${session}" ;; esac
+  local remote_cmd="tmux attach -t '${session}'"
+  if [[ -n "$zoom_idx" ]]; then
+    remote_cmd="tmux select-window -t '${session}:agents' \\; \
+select-pane -t '${session}:agents.${zoom_idx}' \\; \
+resize-pane -t '${session}:agents.${zoom_idx}' -Z \\; \
+attach -t '${session}'"
+  fi
+  if [[ "${YAAMUX_USE_MOSH:-0}" == "1" ]]; then
+    command -v mosh &>/dev/null || die "mosh not installed locally — brew install mosh, or drop --mosh."
+    log "mosh ${target} → ${session}"
+    # sh -lc (not bash) keeps the remote dep at POSIX sh + mosh-server.
+    exec mosh "$target" -- sh -lc "$remote_cmd"
+  fi
+  log "ssh -t ${target} → ${session}"
+  exec ssh -t -- "$target" "$remote_cmd"
+}
+
+# Show & explain the hosts.conf file.
+_remote_hosts_show() {
+  echo ""
+  log "Host aliases:   ${HOSTS_CONF}"
+  if [[ ! -f "$HOSTS_CONF" ]]; then
+    echo ""
+    echo "  No alias file yet.  Create one:"
+    echo "    mkdir -p '$(dirname "$HOSTS_CONF")'"
+    echo "    \$EDITOR '${HOSTS_CONF}'"
+    echo ""
+    echo "  Format — one alias per line:    <alias>  <ssh-target>"
+    echo "  Example:"
+    echo "      work    vihang@work.tail-scale.net"
+    echo "      laptop  vihang@laptop.local"
+    echo ""
+    echo "  Then attach with:    yaamux --remote work"
+    return 0
+  fi
+  echo ""
+  printf "  %-20s  %s\n" "ALIAS" "SSH-TARGET"
+  local line a t
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    [[ -z "${line// /}" ]] && continue
+    read -r a t <<< "$line"
+    [[ -z "$a" ]] && continue
+    printf "  %-20s  %s\n" "$a" "$t"
+  done < "$HOSTS_CONF"
+  echo ""
+  log "Use:    yaamux --remote <alias>"
+}
+
+_remote_help() {
+  cat << HELP
+yaamux --remote — operate on yaamux sessions over SSH
+
+Usage:
+  yaamux --remote <host>                       Pick a session and attach (numbered prompt)
+  yaamux --remote <host> <session-or-repo>     Attach directly  (myapp → yaamux-myapp)
+  yaamux --remote <host> --list [--json]       List yaamux-* sessions on the host
+  yaamux --remote <host> --status [<session>]  Windows/panes status — no attach
+  yaamux --remote <host> --zoom N [<session>]  Attach with pane N zoomed (great for phones)
+  yaamux --remote-hosts                        Show host aliases configured locally
+
+Transport (attach / --zoom only, or set YAAMUX_MOSH=1):
+  --ssh    Use 'ssh -t' for attach   (default — reliable, no deps on the remote)
+  --mosh   Use mosh for attach        (survives sleep / network drops — ideal for phones)
+  (--list and --status always use ssh; they're one-shot queries and don't benefit from mosh.)
+
+<host> is a bare ssh target (user@host) or an alias from:
+  ${HOSTS_CONF}
+
+  Format — one per line:    <alias>  <ssh-target>
+  Example:
+      work    vihang@work.tail-scale.net
+      laptop  vihang@laptop.local
+
+Requires 'tmux' on the remote (and 'mosh-server' + 'sh' if you use --mosh).
+yaamux itself does not need to be installed there.
+HELP
+}
+
+# Dispatch --remote subcommands.   Args after '--remote' are passed verbatim.
+_remote_dispatch() {
+  local use_mosh="${YAAMUX_MOSH:-0}"
+  local args=() a
+  for a in "$@"; do
+    case "$a" in
+      --mosh) use_mosh=1 ;;
+      --ssh)  use_mosh=0 ;;
+      *)      args+=("$a") ;;
+    esac
+  done
+  set -- "${args[@]+"${args[@]}"}"
+  export YAAMUX_USE_MOSH="$use_mosh"
+
+  local raw_host="${1:-}"
+  if [[ -z "$raw_host" || "$raw_host" == "--help" || "$raw_host" == "-h" ]]; then
+    _remote_help; return 0
+  fi
+  shift
+  local target; target="$(_remote_resolve_host "$raw_host")"
+  [[ -z "$target" ]] && die "--remote needs a host or alias."
+  # Guard against ssh/mosh option-injection if the resolved target starts with '-'.
+  case "$target" in -*) die "Refusing ssh/mosh target that starts with '-': ${target}" ;; esac
+
+  case "${1:-}" in
+    --list)
+      local fmt="human"; [[ "${2:-}" == "--json" ]] && fmt="json"
+      _remote_print_list "$target" "$fmt" ;;
+    --status)
+      local sess="${2:-}"
+      [[ -z "$sess" ]] && { sess="$(_remote_pick_session "$target")" || return 1; }
+      sess="$(_remote_normalize_session "$sess")"
+      case "$sess" in *\'*|*\"*|*\\*|*\;*) die "Invalid session name." ;; esac
+      header "remote status: ${target} :: ${sess}"
+      ssh -o ConnectTimeout=10 -- "$target" "
+tmux list-windows -t '${sess}' 2>/dev/null || echo '  (session not found)'
+echo
+tmux list-panes -t '${sess}:agents' -F '  pane #{pane_index}: #{pane_title}  dead=#{pane_dead}' 2>/dev/null || true
+" ;;
+    --zoom)
+      local n="${2:-}"
+      [[ -z "$n" ]] && die "Usage: yaamux --remote <host> --zoom N [session]"
+      [[ "$n" =~ ^[1-9][0-9]*$ ]] || die "--zoom needs a numeric pane index (1-based)."
+      local sess="${3:-}"
+      [[ -z "$sess" ]] && { sess="$(_remote_pick_session "$target")" || return 1; }
+      sess="$(_remote_normalize_session "$sess")"
+      _remote_attach "$target" "$sess" "$((n-1))" ;;
+    --help|-h) _remote_help ;;
+    "")
+      local sess
+      sess="$(_remote_pick_session "$target")" || return 1
+      _remote_attach "$target" "$sess" ;;
+    --*)
+      die "Unknown --remote sub-flag: $1   (try: yaamux --remote --help)" ;;
+    *)
+      local sess; sess="$(_remote_normalize_session "$1")"
+      _remote_attach "$target" "$sess" ;;
+  esac
+}
+
+# =============================================================================
 #  Argument parsing
 # =============================================================================
 # Pre-extract global modifiers (--yolo, --layout) that combine with positional args.
@@ -746,6 +1017,13 @@ case "${1:-}" in
     exit $? ;;
   --ssh-config)     _gen_ssh_config;      exit 0 ;;
   --install-service) _install_launchagent; exit 0 ;;
+
+  --remote)
+    shift
+    _remote_dispatch "$@"
+    exit $? ;;
+
+  --remote-hosts)   _remote_hosts_show;    exit 0 ;;
 
   --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
 
