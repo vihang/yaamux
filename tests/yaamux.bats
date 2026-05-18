@@ -104,6 +104,114 @@ STUB
   rm -rf "$stub_dir"
 }
 
+# ── --prepare-host (host-level mosh-server PATH fix for iOS mosh:// URLs) ─────
+
+@test "--prepare-host rejects bogus sub-arg" {
+  run_yaamux --prepare-host --bogus
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage"* ]]
+}
+
+@test "--prepare-host --check is read-only and fails clearly when mosh-server is absent" {
+  # Skip if mosh-server lives anywhere _find_mosh_server probes — the
+  # test wants to exercise the "not installed" branch, which requires
+  # a truly mosh-server-less machine. (CI runners are clean; dev boxes
+  # with brew install mosh aren't.)
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server \
+        || -x /opt/homebrew/bin/mosh-server || -x /opt/local/bin/mosh-server ]]; then
+    skip "mosh-server is present in a probed dir — can't test the missing case"
+  fi
+  PATH=/usr/bin:/bin run_yaamux --prepare-host --check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not installed"* ]]
+  [[ "$output" == *"brew install mosh"* ]]
+}
+
+@test "--connect points users at --prepare-host when mosh is installed but mosh-server is off PATH" {
+  # Stub `mosh` so the connect-output's `command -v mosh` check is true.
+  # On the test runner /usr/local/bin/mosh-server and /usr/bin/mosh-server
+  # are absent, so _mosh_server_on_default_path returns false and the
+  # warning fires.
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server ]]; then
+    skip "mosh-server is on ssh's default PATH here — warning won't fire"
+  fi
+  stub_dir="$(mktemp -d -t yaamux-moshstub-XXXXXX)"
+  cat > "${stub_dir}/mosh" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "${stub_dir}/mosh"
+
+  PATH="${stub_dir}:${PATH}" run_yaamux --connect
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"yaamux --prepare-host"* ]]
+
+  rm -rf "$stub_dir"
+}
+
+@test "_mosh_server_on_default_path: returns true iff /usr/local/bin or /usr/bin has mosh-server" {
+  # Source the helper and reflect actual filesystem state.
+  body="$(awk '/^_mosh_server_on_default_path\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  if [[ -x /usr/local/bin/mosh-server || -x /usr/bin/mosh-server ]]; then
+    _mosh_server_on_default_path
+  else
+    ! _mosh_server_on_default_path
+  fi
+}
+
+@test "--prepare-host symlinks mosh-server and is idempotent on a second run" {
+  # Exercises the apply branch (sudo + ln) using the test-only env knobs.
+  # YAAMUX_PREPARE_HOST_TARGET redirects the destination into a writable
+  # temp dir; YAAMUX_PREPARE_HOST_SUDO="" disables the privilege wrapper
+  # so the symlink runs as the test user.
+  stub_dir="$(mktemp -d -t yaamux-mssstub-XXXXXX)"
+  target_dir="$(mktemp -d -t yaamux-target-XXXXXX)"
+  cat > "${stub_dir}/mosh-server" << 'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "${stub_dir}/mosh-server"
+  target="${target_dir}/mosh-server"
+
+  # First run: create the symlink.
+  PATH="${stub_dir}:${PATH}" \
+    YAAMUX_PREPARE_HOST_TARGET="$target" \
+    YAAMUX_PREPARE_HOST_SUDO="" \
+    run_yaamux --prepare-host
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Done"* ]]
+  [ -L "$target" ]
+  [ "$(readlink "$target")" = "${stub_dir}/mosh-server" ]
+
+  # Second run: idempotent — should report already-symlinked, not redo it.
+  PATH="${stub_dir}:${PATH}" \
+    YAAMUX_PREPARE_HOST_TARGET="$target" \
+    YAAMUX_PREPARE_HOST_SUDO="" \
+    run_yaamux --prepare-host
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already symlinked"* ]]
+  [[ "$output" != *"Done"* ]]
+
+  rm -rf "$stub_dir" "$target_dir"
+}
+
+@test "_find_mosh_server falls back to /opt/homebrew/bin when missing from PATH" {
+  # Stub a fake mosh-server in a non-PATH location, strip PATH so
+  # `command -v` misses, and verify the helper still locates it.
+  body="$(awk '/^_find_mosh_server\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+
+  if [[ -x /opt/homebrew/bin/mosh-server || -x /usr/local/bin/mosh-server \
+        || -x /usr/bin/mosh-server || -x /opt/local/bin/mosh-server ]]; then
+    skip "real mosh-server present in a probed dir — can't test the fallback in isolation"
+  fi
+
+  # PATH that misses mosh-server entirely.
+  PATH=/usr/bin:/bin run bash -c "$(declare -f _find_mosh_server); _find_mosh_server"
+  [ "$status" -ne 0 ]
+}
+
 @test "--list with no sessions reports empty (human)" {
   run_yaamux --list
   [ "$status" -eq 0 ]
