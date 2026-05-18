@@ -793,3 +793,99 @@ PY
   [ "$status" -eq 0 ]
   grep -qxF ".yaamux/panels/" .gitignore
 }
+
+# ── Agent discoverability (issue #28) ─────────────────────────────────────────
+# Tier-1 surface for agents running inside yaamux:
+#   (1) the scaffolded AGENTS.md ships an inline recipe of yaamux commands
+#   (2) YAAMUX_AGENT_MODE=safe disables destructive flags
+#   (3) YAAMUX_REPO_ROOT redirects REPO_ROOT so an agent invoking yaamux from
+#       inside a worktree resolves to the main checkout (so --bg-list etc are
+#       visible from both the agent and the operator).
+
+@test "--init AGENTS.md template contains the yaamux runtime recipe" {
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -q "yaamux runtime" AGENTS.md
+  grep -q "YAAMUX_AGENT_NAME" AGENTS.md
+  grep -q "YAAMUX_AGENT_NUMBER" AGENTS.md
+  grep -q "YAAMUX_SESSION" AGENTS.md
+  grep -q "YAAMUX_REPO_ROOT" AGENTS.md
+  grep -q "YAAMUX_AGENT_MODE" AGENTS.md
+  grep -q -- "--bg" AGENTS.md
+  grep -q -- "--send N" AGENTS.md
+  grep -q "Don't run these" AGENTS.md
+}
+
+@test "YAAMUX_AGENT_MODE=safe refuses --kill" {
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --kill
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled in agent mode"* ]]
+  [[ "$output" == *"YAAMUX_AGENT_MODE=safe"* ]]
+}
+
+@test "YAAMUX_AGENT_MODE=safe refuses --clean" {
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --clean --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled in agent mode"* ]]
+}
+
+@test "YAAMUX_AGENT_MODE=safe refuses --install / --uninstall / --install-service" {
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --install
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled in agent mode"* ]]
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --uninstall
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled in agent mode"* ]]
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --install-service
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled in agent mode"* ]]
+}
+
+@test "YAAMUX_AGENT_MODE unset (default) allows --kill (backward-compatible)" {
+  # No session is running, so --kill ends with "Not running." but exits 0.
+  unset YAAMUX_AGENT_MODE
+  run_yaamux --kill
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Not running"* || "$output" == *"Killed"* ]]
+}
+
+@test "YAAMUX_AGENT_MODE=safe leaves read-only flags alone" {
+  # --version / --keys / --status / --list / --bg-list are not destructive.
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --version
+  [ "$status" -eq 0 ]
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --keys
+  [ "$status" -eq 0 ]
+  YAAMUX_AGENT_MODE=safe run bash "$YAAMUX_BIN" --bg-list
+  [ "$status" -eq 0 ]
+}
+
+@test "YAAMUX_REPO_ROOT overrides REPO_ROOT (so --bg from a worktree targets main repo)" {
+  # Two repos: main + a separate dir simulating an agent's worktree.
+  main_repo="$TEST_REPO"
+  alt_dir="$(mktemp -d -t yaamux-alt-XXXXXX)"
+  git -C "$alt_dir" init -q
+  git -C "$alt_dir" -c user.email=test@yaamux.test -c user.name=yaamux-test \
+    commit -q --allow-empty -m init
+  # Hand-place a fake panel under the main repo's panels dir.
+  mkdir -p "${main_repo}/.yaamux/panels"
+  printf 'TOKEN=hop1\nPANE_ID=%%01\nCMD=true\nSTARTED=2026-05-19T00:00:00Z\n' \
+    > "${main_repo}/.yaamux/panels/sample.meta"
+  printf 'hello\n[[YAAMUX:PANEL:hop1:DONE:RC=0]]\n' \
+    > "${main_repo}/.yaamux/panels/sample.log"
+
+  # Run --bg-list from the *alt* dir, but with YAAMUX_REPO_ROOT pointing to
+  # the main repo. The panel must show up — proving REPO_ROOT was overridden.
+  cd "$alt_dir"
+  YAAMUX_REPO_ROOT="$main_repo" run bash "$YAAMUX_BIN" --bg-list --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"name\": \"sample\""* ]]
+  [[ "$output" == *"\"status\": \"done\""* ]]
+
+  # Sanity: without the override, --bg-list from alt_dir sees no panels.
+  run bash "$YAAMUX_BIN" --bg-list --json
+  [ "$status" -eq 0 ]
+  [ "$output" = "[]" ]
+
+  cd "$main_repo"
+  rm -rf "$alt_dir"
+}

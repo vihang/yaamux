@@ -48,7 +48,11 @@ SELF="$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
 YAAMUX_HOME="$(dirname "$SELF")"
 
 # ── Project context ────────────────────────────────────────────────────────────
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# YAAMUX_REPO_ROOT is set per-pane in the launch loop so an agent running from
+# one of its worktrees (where `git rev-parse --show-toplevel` would resolve to
+# the worktree path) still sees the *main* checkout — keeping SESSION, PANELS_DIR
+# and friends consistent with the user's main `yaamux --bg-list` / `--status`.
+REPO_ROOT="${YAAMUX_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 PROJECT_NAME="$(basename "$REPO_ROOT")"
 SESSION="yaamux-${PROJECT_NAME}"                 # one session per repo
 WORKTREES_BASE="${REPO_ROOT}/../${PROJECT_NAME}-worktrees"
@@ -835,7 +839,19 @@ _restart_pane() {
     sleep 0.5
   fi
   log "Restarting ${agent_name} (${type})..."
-  tmux send-keys -t "${SESSION}:agents.${idx}" "$(agent_cmd "$type" "$agent_name")" Enter
+  # Re-inject the per-agent YAAMUX_* env vars — the session-level set-environment
+  # only reaches *new* shells (respawn-pane gives us one), but the agent-scoped
+  # ones (NAME/NUMBER/TYPE/PANE_ID) aren't session-wide. Pull NUMBER back from
+  # the agent name (`agent-N` → N) so manual restart matches the launch order.
+  local agent_num="${agent_name#agent-}"
+  local agent_total
+  agent_total="$(tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
+    | grep -cx 'agent' 2>/dev/null || true)"
+  [[ -z "$agent_total" || "$agent_total" == "0" ]] && agent_total="$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  local apid
+  apid="$(tmux display-message -p -t "${SESSION}:agents.${idx}" '#{pane_id}' 2>/dev/null || echo '')"
+  tmux send-keys -t "${SESSION}:agents.${idx}" \
+    "export YAAMUX_AGENT_NAME='${agent_name}' YAAMUX_AGENT_NUMBER='${agent_num}' YAAMUX_AGENT_TOTAL='${agent_total}' YAAMUX_AGENT_TYPE='${type}' YAAMUX_SESSION='${SESSION}' YAAMUX_PANE_ID='${apid}' YAAMUX_REPO_ROOT='${REPO_ROOT}' YAAMUX_AGENT_MODE=safe; clear; $(agent_cmd "$type" "$agent_name")" Enter
   tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-state "running" 2>/dev/null || true
 }
 
@@ -1588,9 +1604,54 @@ Aider, Gemini CLI, Copilot, and 60+ other tools — see https://agents.md/.
 ## PR guidelines
 <!-- e.g., one feature per PR; tests required; conventional commits -->
 
-## Notes for agents
+## yaamux runtime
+
 This project uses yaamux (https://github.com/vihang/yaamux) to orchestrate
-parallel agent worktrees. See YAAMUX.md for the per-pane CLI.
+parallel agent worktrees. If you are reading this from inside a yaamux pane,
+you have a set of environment variables that describe your situation:
+
+| Var | What it tells you |
+|-----|-------------------|
+| `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
+| `YAAMUX_AGENT_NUMBER` | 1-based, e.g. `3` |
+| `YAAMUX_AGENT_TOTAL`  | total agents in this session |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
+| `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
+| `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
+| `YAAMUX_VERSION`      | yaamux version string |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent — destructive flags are refused |
+
+Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
+next to the parent of `YAAMUX_REPO_ROOT`.
+
+### Commands you can run from this shell
+
+Read / inspect:
+- `yaamux --list --json` — what other yaamux sessions are running on this machine
+- `yaamux --status` — per-pane health of this session
+- `yaamux --keys` — full CLI reference
+
+Coordinate with siblings:
+- `yaamux --send N "<prompt>"` — send a prompt to sibling agent N
+- `yaamux --exec N "<cmd>" [timeout]` — synchronous: run + wait for completion
+
+Background work (non-blocking):
+- `yaamux --bg <name> "<cmd>"` — start a long-running command in a dedicated pane
+- `yaamux --bg-tail <name> [--from N] [--follow]` — read its output from byte offset N
+- `yaamux --bg-list [--json]` — see all background tasks with status
+- `yaamux --bg-kill <name>` — stop a background task
+
+Ship your work:
+- `yaamux --pr <agent-number> "title"` — push + open a PR for the named agent's worktree
+
+### Don't run these (human-owned)
+
+These are refused while `YAAMUX_AGENT_MODE=safe` — leave to the operator:
+
+- `yaamux --kill` — tears down the session you're running in
+- `yaamux --clean` / `--clean --force` — removes worktrees (including yours)
+- `yaamux --install` / `--uninstall` / `--install-service` — host-level config
 AGENTS_EOF
 }
 
@@ -2190,6 +2251,19 @@ if [[ -n "${1:-}" && "${1:0:2}" != "--" ]]; then
   if [[ "$1" =~ ^[0-9]+$ ]]; then N="$1"; shift; fi
   PATTERN=("$@")
   shift $# 2>/dev/null || true
+fi
+
+# ── Safe-mode guard ────────────────────────────────────────────────────────────
+# YAAMUX_AGENT_MODE=safe is set per-pane in the launch loop. Agents reading the
+# scaffolded AGENTS.md learn the CLI surface; this guard makes sure a curious
+# agent can't `--kill` its own session or `--clean --force` away its siblings.
+# The user's own shell outside the session sees no change since the var isn't
+# exported there.
+if [[ "${YAAMUX_AGENT_MODE:-}" == "safe" ]]; then
+  case "${1:-}" in
+    --kill|--clean|--uninstall|--install|--install-service)
+      die "Flag $1 is disabled in agent mode (YAAMUX_AGENT_MODE=safe). Ask the operator to run this from their own shell." ;;
+  esac
 fi
 
 # ── Flag commands ──────────────────────────────────────────────────────────────
@@ -3029,6 +3103,25 @@ tmux select-layout -t "${SESSION}:logs" tiled
 # has something to find.
 tmux set-window-option -t "${SESSION}:agents" remain-on-exit on
 
+# Resolve the version string once. We mirror _show_version's lookup (VERSION
+# file lives next to the script for git installs, under share/yaamux/ for brew).
+YAAMUX_VERSION_STR="dev"
+for _ver_candidate in "${YAAMUX_HOME}/VERSION" "${YAAMUX_HOME}/../share/yaamux/VERSION"; do
+  if [[ -f "$_ver_candidate" ]]; then
+    YAAMUX_VERSION_STR="$(cat "$_ver_candidate")"
+    break
+  fi
+done
+
+# Session-level env: inherited by any *new* shell spawned later in this session
+# (e.g. a manually-opened pane). The current agent shells are already alive so
+# we still need the per-pane export below — this just plugs the new-shell hole.
+tmux set-environment -t "$SESSION" YAAMUX_SESSION   "$SESSION"
+tmux set-environment -t "$SESSION" YAAMUX_REPO_ROOT "$REPO_ROOT"
+tmux set-environment -t "$SESSION" YAAMUX_VERSION   "$YAAMUX_VERSION_STR"
+tmux set-environment -t "$SESSION" YAAMUX_AGENT_MODE safe
+tmux set-environment -t "$SESSION" YAAMUX_AGENT_TOTAL "${#AGENTS[@]}"
+
 # ── Launch agents ──────────────────────────────────────────────────────────────
 for i in "${!AGENTS[@]}"; do
   agent="${AGENTS[$i]}"; type="${AGENT_TYPES[$i]}"
@@ -3042,7 +3135,16 @@ for i in "${!AGENTS[@]}"; do
   tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-type  "$type"
   tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-state "running"
   tmux pipe-pane   -t "${SESSION}:agents.${apidx}" -o "cat >> ${LOG_FILE}"
-  tmux send-keys   -t "${SESSION}:agents.${apidx}" "$(agent_cmd "$type" "$agent")" Enter
+  # Resolve the actual pane id so the agent's shell can quote itself in logs /
+  # send-keys to siblings. display-message reads the target pane's #{pane_id}.
+  apid="$(tmux display-message -p -t "${SESSION}:agents.${apidx}" '#{pane_id}' 2>/dev/null || echo '')"
+  # Export YAAMUX_* into the pane's shell, then launch the agent. The exports
+  # land in the live shell (so a Ctrl-C + manual relaunch still sees them) and,
+  # together with the session-level set-environment above, cover both the
+  # "current shell" and "new shell in this session" cases.
+  agent_invocation="$(agent_cmd "$type" "$agent")"
+  tmux send-keys -t "${SESSION}:agents.${apidx}" \
+    "export YAAMUX_AGENT_NAME='${agent}' YAAMUX_AGENT_NUMBER=$((i+1)) YAAMUX_AGENT_TOTAL=${#AGENTS[@]} YAAMUX_AGENT_TYPE='${type}' YAAMUX_SESSION='${SESSION}' YAAMUX_PANE_ID='${apid}' YAAMUX_REPO_ROOT='${REPO_ROOT}' YAAMUX_VERSION='${YAAMUX_VERSION_STR}' YAAMUX_AGENT_MODE=safe; clear; ${agent_invocation}" Enter
   tmux select-pane -t "${SESSION}:logs.${i}" -T "📋 ${agent}"
   tmux send-keys   -t "${SESSION}:logs.${i}" \
     "tail -f ${LOG_FILE} 2>/dev/null || { sleep 2; exec tail -f ${LOG_FILE}; }" Enter

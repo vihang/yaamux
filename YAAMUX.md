@@ -570,6 +570,59 @@ can call any of these flags from their own shell — that's the whole point.
 A common pattern: agent A starts a dev server with `--bg`, agent B
 periodically `--bg-tail`s it to look for errors and reacts.
 
+An agent's pwd is its worktree (`<repo>-worktrees/agent-N`), not the main
+checkout. To keep `--bg-list` consistent across all panes (and the user's
+own shell), every yaamux command honors `YAAMUX_REPO_ROOT` — which the
+launch loop sets per-pane to the main checkout — and resolves `PANELS_DIR`,
+`SESSION`, etc. from there. Agents inherit this automatically; nothing
+special to do.
+
+---
+
+## Agent runtime environment
+
+When yaamux launches an agent into its pane, it exports the following
+variables into the shell so the agent CLI inherits them. Agents (or any
+shell command running in the pane) can read these to understand their
+situation without parsing tmux state:
+
+| Var | What it tells you |
+|-----|-------------------|
+| `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
+| `YAAMUX_AGENT_NUMBER` | 1-based ordinal, e.g. `3` |
+| `YAAMUX_AGENT_TOTAL`  | total agents in this session |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
+| `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
+| `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
+| `YAAMUX_VERSION`      | yaamux version string |
+| `YAAMUX_AGENT_MODE`   | `safe` — destructive flags are refused |
+
+The session-scoped subset (`YAAMUX_SESSION`, `YAAMUX_REPO_ROOT`,
+`YAAMUX_VERSION`, `YAAMUX_AGENT_MODE`, `YAAMUX_AGENT_TOTAL`) is also set
+via `tmux set-environment` so any *new* shell spawned later in the session
+inherits them. The per-agent vars (`YAAMUX_AGENT_NAME` / `_NUMBER` /
+`_TYPE` / `_PANE_ID`) are re-exported on `--restart N`.
+
+### Safe mode (`YAAMUX_AGENT_MODE=safe`)
+
+The scaffolded `AGENTS.md` template tells agents about the yaamux CLI. To
+make sure a curious agent can't accidentally `--kill` its own session,
+yaamux refuses these flags when `YAAMUX_AGENT_MODE=safe`:
+
+| Refused flag | Why |
+|--------------|-----|
+| `--kill` | tears down the session the agent is running in |
+| `--clean` / `--clean --force` | removes the agent's own worktree |
+| `--install` / `--uninstall` | host-level CLI install |
+| `--install-service` | LaunchAgent install |
+
+The variable is exported per-pane during launch, so the user's own shell
+outside the tmux session sees no change — only panes that yaamux itself
+started are in safe mode. To override (e.g. an agent that legitimately
+needs to clean up its sibling), the operator can run the command from
+their own shell.
+
 ---
 
 ## VS Code handoff
