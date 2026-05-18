@@ -73,6 +73,13 @@ multiple repos simultaneously without collision.
 | `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
 | `--restart N` | Restart pane N (relaunches its agent type) |
 | `--restart-dead [-y]` | Restart every pane whose agent has exited or died (`-y` skips confirm) |
+| `--toggle-panel` | Show/hide the Control Panel pane (persists via `.yaamux/state`) |
+| `--panel-show` / `--panel-hide` | Explicit show/hide of the Control Panel pane |
+| `--goto N` | Focus the Nth agent pane (skips control-panel pane) |
+| `--bg <name> "<cmd>"` | Spawn a background panel running `<cmd>` — see "Background panels" |
+| `--bg-tail <name> [--from N] [--follow]` | Read a panel's log from byte offset `N`; `--follow` streams until completion |
+| `--bg-list [--json]` | List background panels with status, RC, log size |
+| `--bg-kill <name>` | Stop a running panel (preserves the log on disk for `--bg-tail`) |
 | `--logs` | Jump to the live-logs window |
 | `--sync` | Toggle synchronize-panes (keystrokes → all panes) |
 | `--yolo` | Modifier: launch agents with full permission bypass |
@@ -94,6 +101,45 @@ The `--yolo` and `--link-env` modifiers combine with positional args
 (e.g., `yaamux --yolo 4 claude` or `yaamux 2 --link-env`). Equivalent
 env vars: `YAAMUX_YOLO=1`, `YAAMUX_LINK_ENV=1`.
 
+### `--list --json` schema (integration contract)
+
+`yaamux --list --json` emits an array of objects, one per yaamux-* tmux
+session running on this machine. **This schema is stable across the v0.x
+series — additive only; existing keys will not be removed or renamed
+without a major version bump.** Integrations can depend on it.
+
+```json
+[
+  {
+    "session": "yaamux-myapp",
+    "agents":  4,
+    "attached": true,
+    "repo":    "/Users/vihang/Code/myapp"
+  }
+]
+```
+
+| Key | Type | Notes |
+|-----|------|-------|
+| `session` | string | Full tmux session name (`yaamux-<project>`); use as `-t <session>` target |
+| `agents`  | int    | Count of `@yaamux-role=agent` panes in the `agents` window. Excludes the Control Panel pane. Falls back to total pane count for pre-v0.2 sessions that lack the role tag. |
+| `attached` | bool  | `true` iff at least one tmux client is currently attached to this session |
+| `repo`     | string | Absolute path to the repo root, read from the session's `@yaamux-repo` user-option |
+
+Empty result is the literal string `[]`. Exit code is `0` in both cases —
+"no sessions" is not an error.
+
+Example consumer (pick the first attached session and zoom pane 1):
+
+```bash
+sess=$(yaamux --list --json | jq -r '.[] | select(.attached) | .session' | head -1)
+[[ -n "$sess" ]] && yaamux --zoom 1
+```
+
+Per-pane state inside a session is not yet part of `--list --json`; see
+`yaamux --status` for the human-readable form (a structured `--status --json`
+is on the roadmap).
+
 ---
 
 ## tmux layout & navigation
@@ -113,6 +159,7 @@ Prefix is **Ctrl+Space**.
 | Keys | Action |
 |------|--------|
 | `Ctrl+Space` + arrows | Move between panes |
+| `Ctrl+Space` + `Space` | Zoom / unzoom current pane (ergonomic alias for `Z`) |
 | `Ctrl+Space` + `Z` | Zoom / unzoom current pane |
 | `Ctrl+Space` + `W` | Window list (agents / remote-srv / logs) |
 | `Ctrl+Space` + `[` | Enter scroll mode (`q` to exit, `/` to search) |
@@ -121,6 +168,8 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `r` | Restart the agent in the current pane |
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
+| `Ctrl+Space` + `p` | Toggle Control Panel pane (show/hide; persists) |
+| `Ctrl+Space` + `1`-`9` | Jump to agent pane N (skips control-panel) |
 | `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
 | `Ctrl+Space` + `Q` | QR popup encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
@@ -404,8 +453,122 @@ attention. Optional Slack webhook for parallel desktop alerts.
 Push fires for **Claude panes only** (uses Claude's hook system). For other
 agents, the tmux activity highlight (orange window tab) flags new output.
 
-Helper scripts (`yaamux-notify.sh`, `yaamux-mobile-attach.sh`) are generated
-automatically and self-heal if missing.
+Helper scripts (`yaamux-notify.sh`, `yaamux-mobile-attach.sh`,
+`yaamux-cpanel.sh`) are generated automatically and self-heal if missing.
+
+Every notification is also appended to
+`${XDG_CACHE_HOME:-~/.cache}/yaamux/notifications.log` as JSON-Lines (last
+500 kept) — the Control Panel TUI tails this file for its feed, and the
+bottom status-line indicator badges the pane that's awaiting attention.
+
+---
+
+## Control Panel
+
+By default yaamux mounts a **Control Panel pane** alongside the agents — a
+TUI dashboard showing every local yaamux session, the current session's
+per-pane state, a feed of recent notifications, and a one-key command
+menu. Toggle it with `Ctrl+Space + p` (the visible/hidden choice is
+remembered in `.yaamux/state`).
+
+Layout adapts to the number of agents:
+
+| `N` agents | Mode | Why |
+|------------|------|-----|
+| Odd (1, 3, 5, …) | **tile** — panel is one more pane in the tiled grid | Total panes is even, tiles cleanly |
+| Even (2, 4, 6, …) | **sidebar** — panel is a right column at 30% width | Agent grid stays balanced |
+
+Force a mode by setting `CONTROL_PANEL_MODE=tile`, `sidebar`, or `auto`
+in `.yaamux/state` (per-repo) or `~/.config/yaamux/control-panel.conf`
+(global default — per-repo wins). On narrow terminals (cols below
+`YAAMUX_CPANEL_MIN_COLS`, default 120) sidebar mode auto-falls back to
+tile.
+
+**Inside the Control Panel pane:**
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle section focus: panes → sessions → notifications |
+| `j` / `k` / arrows | Move selection in the focused section |
+| `Enter` | Default action — switch-client to selected session, focus selected pane |
+| `1`-`9` | Jump to agent pane N |
+| `r` | Restart the selected pane (`--restart N`) |
+| `R` | Restart all dead/idle (`--restart-dead -y`) |
+| `z` | Toggle zoom on the selected pane |
+| `s` | Toggle synchronize-panes for the agents window |
+| `h` / `q` | Hide the panel (`--panel-hide`) |
+| `?` | Show / hide in-panel help |
+
+**Permanent bottom indicator.** Whether the panel is visible or not, the
+tmux status-right shows one chip per agent pane — `[1✓]` running, `[2⚠]`
+idle, `[3✗]` dead, `[4!]` notification pending (magenta). `Ctrl+Space + N`
+jumps straight to agent pane `N`, so an unread notification is one chord
+away. Focusing a pane clears its `!` badge.
+
+---
+
+## Background panels
+
+Long-running shell commands (dev servers, test watchers, builds, log tails)
+belong somewhere they won't block an agent and won't get scrolled off-screen.
+**Background panels** are non-agent tmux panes in a dedicated `bg` window
+whose output is captured to disk, so any agent — or the user, hours later —
+can resume reading from a byte offset.
+
+```bash
+# From anywhere inside the repo (including an agent's own pane):
+yaamux --bg watch "pnpm test --watch"
+yaamux --bg build "make ci"
+
+# Tail from the start, then learn the next offset:
+yaamux --bg-tail watch
+# ...output...
+# OFFSET=4096
+# STATUS=running
+
+# Resume from where you left off:
+yaamux --bg-tail watch --from 4096
+
+# Block until it finishes:
+yaamux --bg-tail build --follow
+# ...streamed output...
+# OFFSET=12345
+# STATUS=done
+# RC=0
+
+yaamux --bg-list
+# NAME    STATUS  RC  PANE   STARTED               CMD
+# watch   running -   %23    2026-05-19T14:23:01Z  pnpm test --watch
+# build   done    0   %24    2026-05-19T14:00:00Z  make ci
+
+yaamux --bg-kill watch
+```
+
+**How completion is detected.** Each panel runs the user's command wrapped
+in a one-liner that emits a unique-per-panel sentinel
+`[[YAAMUX:PANEL:<token>:DONE:RC=<n>]]` on the controlling tty after the
+command returns. `tmux pipe-pane` captures the sentinel into the log, and
+`--bg-tail` / `--bg-list` grep for it. The token (12 random characters,
+stored in the panel's `.meta` file) is per-panel so even commands whose
+output happens to contain a literal `[[YAAMUX:PANEL:` won't false-positive.
+
+**Storage.** Per-repo, gitignored:
+
+```
+<repo>/.yaamux/panels/<name>.log    raw output, append-only
+<repo>/.yaamux/panels/<name>.meta   TOKEN, PANE_ID, CMD, STARTED
+```
+
+`--kill` preserves these files (so `--bg-tail` still works on the next
+session start); `--clean` removes them alongside the worktrees.
+
+**Status values:** `running`, `done` (exit 0), `failed` (non-zero), `killed`
+(SIGINT, rc=130), `unknown`.
+
+**Use from within an agent pane.** Agents inside the main `agents` window
+can call any of these flags from their own shell — that's the whole point.
+A common pattern: agent A starts a dev server with `--bg`, agent B
+periodically `--bg-tail`s it to look for errors and reacts.
 
 ---
 
@@ -493,8 +656,10 @@ After `yaamux --init`:
 <repo>/AGENTS.md                ← canonical agent instructions (agents.md spec)
 <repo>/CLAUDE.md                ← symlink → AGENTS.md (for Claude Code)
 <repo>/.yaamux/config           ← per-project defaults
+<repo>/.yaamux/state            ← Control Panel visibility/mode (mutable; gitignored)
+<repo>/.yaamux/panels/          ← Background panel logs + meta (mutable; gitignored)
 <repo>/.worktreeinclude         ← which gitignored files to copy into worktrees
-<repo>/.gitignore               ← appended with .claude/logs/ and ../<repo>-worktrees/
+<repo>/.gitignore               ← appended with .claude/logs/, ../<repo>-worktrees/, .yaamux/state, .yaamux/panels/
 ```
 
 After first `yaamux N [...]` run:
@@ -506,7 +671,10 @@ After first `yaamux N [...]` run:
 └── logs/agent-*.log, blocked.log
 ~/.local/bin/yaamux                ← if installed via --install (not via brew)
 ~/.local/bin/yaamux-mobile-attach.sh ← after --setup-notify
+~/.local/bin/yaamux-cpanel.sh      ← Control Panel TUI
 ~/.config/yaamux/notify.conf       ← after --setup-notify
+~/.config/yaamux/control-panel.conf ← optional global panel defaults (per-repo wins)
+~/.cache/yaamux/notifications.log  ← JSON-Lines feed (last 500 kept)
 ~/.ssh/config                      ← yaamux host block appended
 ```
 

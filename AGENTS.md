@@ -24,7 +24,7 @@ git worktree, in a tiled tmux grid — manageable locally and remotely. It is
 
 | File | Purpose | Keep in sync? |
 |------|---------|---------------|
-| `yaamux` | The entire program — including 3 embedded helper scripts | — |
+| `yaamux` | The entire program — including 4 embedded helper scripts | — |
 | `YAAMUX.md` | End-user usage guide | Yes — update on any UX/flag change |
 | `README.md` | Install instructions for the yaamux repo | Yes — update on install-flow change |
 | `AGENTS.md` | This file — developer/agent guide (CLAUDE.md → symlink) | Yes — update on architecture change |
@@ -45,13 +45,13 @@ After **every** edit to `yaamux`:
 # 1. Syntax-check the main script
 bash -n yaamux
 
-# 2. Syntax-check the 3 embedded heredoc scripts (they ship inside yaamux)
-rm -f /tmp/{GUARD,NOTIFY,MOBILE}_EOF
+# 2. Syntax-check the 4 embedded heredoc scripts (they ship inside yaamux)
+rm -f /tmp/{GUARD,NOTIFY,MOBILE,CPANEL}_EOF
 python3 - <<'PY'
 import re, sys
 src = open('yaamux').read()
 ok = True
-for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF'):
+for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF', 'CPANEL_EOF'):
     m = re.search(r"<<\s*'" + tag + r"'\s*\n(.*?)\n" + tag + r"\s*\n", src, re.S)
     if m:
         open('/tmp/' + tag, 'w').write(m.group(1))
@@ -59,7 +59,7 @@ for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF'):
         print('MISSING', tag); ok = False
 if not ok: sys.exit(1)
 PY
-for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF; do [[ -f /tmp/$t ]] && bash -n /tmp/$t && echo "$t ok"; done
+for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF CPANEL_EOF; do [[ -f /tmp/$t ]] && bash -n /tmp/$t && echo "$t ok"; done
 
 # 3. Lint (install: brew install shellcheck)
 shellcheck yaamux
@@ -82,14 +82,17 @@ These are deliberate design decisions. Do not "improve" them without an
 explicit instruction to do so.
 
 1. **Single file.** The helper scripts (`yaamux-guard.sh`, `yaamux-notify.sh`,
-   `yaamux-mobile-attach.sh`) are embedded as heredocs and written to disk at
-   runtime. Do not split them into separate files — install-once portability
-   depends on `yaamux` being self-contained.
+   `yaamux-mobile-attach.sh`, `yaamux-cpanel.sh`) are embedded as heredocs and
+   written to disk at runtime. Do not split them into separate files —
+   install-once portability depends on `yaamux` being self-contained.
 
 2. **Stateless / no project pinning.** yaamux must derive the project from
    `git rev-parse --show-toplevel` on every run. Never write a config file
-   that hard-codes a repo path. The only persistent config is global and
-   optional: `~/.config/yaamux/notify.conf`.
+   that hard-codes a repo path. Persistent config is opt-in and lives at
+   well-known paths: global at `~/.config/yaamux/{notify,control-panel}.conf`
+   and `~/.config/yaamux/hosts.conf`; per-repo at `<repo>/.yaamux/config`,
+   `<repo>/.yaamux/state`, and `<repo>/.yaamux/panels/<name>.{log,meta}`
+   (all gitignored).
 
 3. **Session per repo.** `SESSION="yaamux-${PROJECT_NAME}"`. Never use a fixed
    session name — it would collide across repos.
@@ -114,6 +117,33 @@ explicit instruction to do so.
    `select-layout tiled`. Never hard-code a 2×2 (or any fixed) geometry —
    yaamux supports 1–20 agents.
 
+9. **Per-pane role tag.** Every pane in the `agents` window carries a
+   `@yaamux-role` user-option — `agent` for an agent pane, `control-panel`
+   for the optional Control Panel TUI pane. Background panels (which live
+   in a separate `bg` window, not `agents`) carry `@yaamux-role=background`.
+   Every loop that iterates the agents window must filter on this option
+   so the control-panel pane is never restarted, broadcast-to, or counted
+   as an agent. Loops that target a specific window by name
+   (`${SESSION}:agents` vs `${SESSION}:bg`) are naturally isolated by
+   window — only cross-window helpers (e.g. `_list_sessions`, the Control
+   Panel TUI's session view) need to be aware of the third role value.
+   The `_agent_pane_idx N` helper resolves the user-facing 1-based agent
+   number to the actual tmux `pane_index`; use it in every `--send N`,
+   `--restart N`, `--zoom N`, `--exec N` site. The agent name (`agent-N`)
+   is stored per-pane on `@yaamux-agent`; read that rather than computing
+   it from a tmux index, which is unstable across layout modes.
+
+10. **Background panels = non-agent, non-blocking shell processes.** They
+    live in the `bg` window (lazy-created on first `--bg`), one pane per
+    panel. Output is captured to `${REPO_ROOT}/.yaamux/panels/<name>.log`
+    via `tmux pipe-pane`; completion is detected by a per-panel sentinel
+    `[[YAAMUX:PANEL:<token>:DONE:RC=<n>]]` emitted on stdout after the
+    command returns. The token is 12 random chars, stored per-panel in
+    `<name>.meta`, so consumers grep for exactly the right line — even
+    commands whose output happens to contain `[[YAAMUX:PANEL:` literally
+    won't false-positive. Status is computed on-the-fly from the log; we
+    do NOT mirror it into a stored field that could go stale.
+
 ---
 
 ## Code map
@@ -126,13 +156,16 @@ The `yaamux` file is ordered top-to-bottom as:
 | Project context | `REPO_ROOT`, `SESSION`, `WORKTREES_BASE`, paths |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
-| Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` |
+| Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
 | Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` / `_prepare_host_mosh` (host-level mosh-server PATH fix for `mosh://` URLs) |
 | Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |
-| Pane health | `_pane_state` / `_refresh_pane_states` / `_restart_pane` / `_triage_prompt` / `_remote_triage_prompt` — back `--restart-current` / `--restart-dead` / `--refresh-states` and the attach-time triage |
+| Pane health | `_pane_state` / `_refresh_pane_states` / `_restart_pane` / `_triage_prompt` / `_remote_triage_prompt` — back `--restart-current` / `--restart-dead` / `--refresh-states` and the attach-time triage. All filter on `@yaamux-role` |
+| Pane addressing | `_agent_pane_idx N` (1-based agent → tmux `pane_index`), `_panel_pane_idx`, `_agent_count` — the canonical way to resolve "agent N" in a panel-aware layout |
+| Control Panel | `_cpanel_show` / `_cpanel_hide` / `_cpanel_toggle` / `_cpanel_self_heal` / `_save_panel_state` / `_status_render` / `_goto_pane` — back `--toggle-panel` / `--panel-show` / `--panel-hide` / `--cpanel` / `--status-render` / `--goto N` |
+| Background panels | `_bg_spawn` / `_bg_tail` / `_bg_list` / `_bg_kill` / `_bg_status` / `_bg_ensure_window` / `_bg_save_meta` / `_bg_read_meta` / `_bg_gen_token` / `_bg_validate_name` — back `--bg` / `--bg-tail` / `--bg-list` / `--bg-kill` |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
 | Flag `case` | All `--xxx` commands; each `exit 0`s |
-| Start sequence | preflight → hooks → worktrees → tmux build → launch → attach |
+| Start sequence | preflight → hooks → worktrees → tmux build (incl. parity-based panel pane) → launch → attach |
 
 ---
 
