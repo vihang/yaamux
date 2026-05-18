@@ -46,7 +46,7 @@ yaamux 1 codex                  # single Codex agent
 - First arg numeric → that's **N**. Following args are a type pattern, cycled to fill N.
 - First arg a type → types are literal, **N** = number of args.
 - No args → 4 Claude agents.
-- Valid types: `claude` `gemini` `copilot` `codex`. Max 20 agents.
+- Valid types: `claude` `gemini` `copilot` `codex` `opencode`. Max 20 agents.
 
 Each repo gets its own tmux session: **`yaamux-<repo-name>`**. Run yaamux in
 multiple repos simultaneously without collision.
@@ -68,6 +68,7 @@ multiple repos simultaneously without collision.
 | `--zoom N` | Attach with pane N zoomed full-screen |
 | `--vscode N` | Hand pane N's session to VS Code for interactive dev |
 | `--send N "x"` | Inject a prompt into pane N without attaching |
+| `--send-stdin N` | Like `--send N`, but reads payload from STDIN as literal bytes (safe for `"`, `$`, newlines — pilot mode's preferred form) |
 | `--exec N "x" [timeout]` | Headless: send, poll for idle, return output (5min default) |
 | `--broadcast "x"` | Send the same prompt to every pane |
 | `--pr N [title] [--merge]` | Push pane N's branch + open PR via the configured forge (`gh` / `glab` / `tea` — see `YAAMUX_FORGE` and the "Pluggable forge" section below) |
@@ -79,6 +80,10 @@ multiple repos simultaneously without collision.
 | `--restart-dead [-y]` | Restart every pane whose agent has exited or died (`-y` skips confirm) |
 | `--toggle-panel` | Show/hide the Control Panel pane (persists via `.yaamux/state`) |
 | `--panel-show` / `--panel-hide` | Explicit show/hide of the Control Panel pane |
+| `--pilot-toggle` | Flip the Control Panel pane between dashboard and pilot chat — see "Pilot mode" |
+| `--pilot-show [BACKEND]` / `--pilot-hide` | Explicit pilot enter/leave (BACKEND = claude / opencode / gemini / codex / copilot) |
+| `--pilot-backend BACKEND` | Persist the default pilot backend (clears stale resume id) |
+| `--pilot-supported` | Print pilot backends installed locally |
 | `--goto N` | Focus the Nth agent pane (skips control-panel pane) |
 | `--bg <name> "<cmd>"` | Spawn a background panel running `<cmd>` — see "Background panels" |
 | `--bg-tail <name> [--from N] [--follow]` | Read a panel's log from byte offset `N`; `--follow` streams until completion |
@@ -174,6 +179,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `p` | Toggle Control Panel pane (show/hide; persists) |
+| `Ctrl+Space` + `P` | Flip Control Panel pane between dashboard and pilot chat |
 | `Ctrl+Space` + `1`-`9` | Jump to agent pane N (skips control-panel) |
 | `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
@@ -502,6 +508,7 @@ tile.
 | `R` | Restart all dead/idle (`--restart-dead -y`) |
 | `z` | Toggle zoom on the selected pane |
 | `s` | Toggle synchronize-panes for the agents window |
+| `c` | Flip this pane into pilot chat (see below) |
 | `h` / `q` | Hide the panel (`--panel-hide`) |
 | `?` | Show / hide in-panel help |
 
@@ -590,6 +597,54 @@ ops + notifier/multiplexer abstractions are subsequent phases.
 
 ---
 
+## Pilot mode — drive the agent panes by chat
+
+The Control Panel pane has two modes: the **dashboard** (default — see
+above) and a **pilot chat** that drives the other agent panes by natural
+language. Press `Ctrl+Space + P` (capital) or `c` from the dashboard to
+flip; press again to flip back.
+
+The pilot is just an agent CLI you already have installed running in the
+panel pane, with a yaamux-orchestrator system prompt and `YAAMUX_PILOT=1`
+in its environment. Auth, billing, conversation memory, and tool-use UX
+all belong to the chosen CLI — yaamux holds no API key.
+
+**Backends** (first installed of, in order): `claude` → `opencode` →
+`gemini` → `codex` → `copilot`. Override with `--pilot-backend BACKEND`
+or `PILOT_BACKEND=…` in `.yaamux/state`. List what's available:
+
+```bash
+yaamux --pilot-supported            # → "claude opencode" (whichever you have)
+```
+
+**Tool surface.** The pilot shells out to the existing yaamux flag
+surface — there's no special protocol. Read-only calls (`--list`,
+`--status`, `--goto N`, `--send N`, `--send-stdin N`) run freely;
+**destructive** calls (`--broadcast`, `--restart`, `--restart-dead`,
+`--kill`, `--clean`) pop a `tmux display-popup` y/N for the human before
+running. Pass `--yes` (or set `YAAMUX_YES=1`) to bypass, e.g. when the
+pilot scripts a known-safe batch.
+
+**Why `--send-stdin N`.** When the pilot forwards arbitrary user text to
+an agent, shell-quoting `"`, `$`, backticks, or newlines through the
+agent CLI's shell call is fragile. `--send-stdin N` reads the payload
+literally from stdin instead — the pilot's prompt instructs it to use
+this form, so a pasted shell snippet in chat reaches the target agent
+verbatim.
+
+**Conversation memory.** Resume IDs are stored at
+`<repo>/.yaamux/pilot.state` keyed by `<backend>.<session>=<id>` — gitignored
+under `.yaamux/`. Toggling out and back in re-enters the same conversation
+when the backend supports it (claude: `--resume`, codex: `codex resume`).
+
+**Backend caveats.** Each agent CLI changes its flag surface every few
+months. claude is the reference backend (system prompt, auto-shell, and
+resume are all well-supported). codex / gemini / copilot / opencode are
+best-effort: yaamux probes that the bin exists on launch and refuses with
+a clear message if it doesn't.
+
+---
+
 ## Background panels
 
 Long-running shell commands (dev servers, test watchers, builds, log tails)
@@ -674,12 +729,13 @@ situation without parsing tmux state:
 | `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
 | `YAAMUX_AGENT_NUMBER` | 1-based ordinal, e.g. `3` |
 | `YAAMUX_AGENT_TOTAL`  | total agents in this session |
-| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` · `opencode` |
 | `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
 | `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
 | `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
 | `YAAMUX_VERSION`      | yaamux version string |
-| `YAAMUX_AGENT_MODE`   | `safe` — destructive flags are refused |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent · `pilot` inside the orchestrator chat · destructive flags are refused while `safe` |
+| `YAAMUX_PILOT_ACTIVE` | backend name (e.g. `claude`) if a pilot is driving this session — unset when the panel is in dashboard mode |
 
 The session-scoped subset (`YAAMUX_SESSION`, `YAAMUX_REPO_ROOT`,
 `YAAMUX_VERSION`, `YAAMUX_AGENT_MODE`, `YAAMUX_AGENT_TOTAL`) is also set
@@ -745,7 +801,7 @@ snapshot you can edit independently, run `yaamux --init --copy-skill`
 instead — that path produces a regular directory and is NOT added to
 `.gitignore`.
 
-Non-Claude agents (Gemini, Codex, Copilot) won't consume
+Non-Claude agents (Gemini, Codex, Copilot, opencode) won't consume
 `.claude/skills/`, but they still benefit from Tier 1's enriched
 `AGENTS.md` and can call `yaamux --agent-brief --format text` directly.
 
