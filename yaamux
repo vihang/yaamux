@@ -26,6 +26,7 @@
 #    yaamux --setup-notify | --ssh-config | --install-service
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
+#    yaamux --connect [--qr]            # print/QR the exact commands to attach from any device
 #    yaamux --init | --install | --update | --uninstall | --add-docs | --version
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
@@ -1275,6 +1276,50 @@ case "${1:-}" in
 
   --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
 
+  --connect)
+    # Print the exact commands anyone can use to reach this host's yaamux
+    # sessions — designed to be shown inside the session (via `prefix C`
+    # display-popup) or run on the host so the user can grab the line.
+    # Adds an ANSI-UTF8 QR for the mosh snippet when invoked with --qr and
+    # `qrencode` is installed (brew install qrencode).
+    shift
+    _c_qr=false
+    case "${1:-}" in --qr|--qrcode) _c_qr=true ;; esac
+    _c_user="$(whoami)"
+    _c_host="${HOST_DISPLAY}"
+    _c_cmd_mosh="mosh --server='${MOSH_SERVER_CMD}' ${_c_user}@${_c_host} -- yaamux --auto-attach"
+    _c_cmd_ssh="ssh -t ${_c_user}@${_c_host} 'yaamux --auto-attach'"
+    _c_cmd_remote="yaamux --remote ${_c_user}@${_c_host}"
+    printf '\n  ── yaamux connect (%s) ─────────────────────────────────\n\n' "$_c_host"
+    echo "  Sessions running:"
+    if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qE '^yaamux-'; then
+      tmux list-sessions -F '    · #{session_name}  (#{session_windows} window, attached: #{session_attached})' 2>/dev/null | grep yaamux- || true
+    else
+      echo "    (none — start one with: yaamux)"
+    fi
+    echo ""
+    printf '  %biOS / iPad / iPhone%b — Blink, Prompt 3 (mosh, sleep-safe, auto UI):\n' "$BOLD" "$NC"
+    printf '    %s\n\n' "$_c_cmd_mosh"
+    printf '  %bSSH fallback%b (no mosh on remote):\n' "$BOLD" "$NC"
+    printf '    %s\n\n' "$_c_cmd_ssh"
+    printf '  %bDesktop%b — yaamux installed on the client:\n' "$BOLD" "$NC"
+    printf '    %s\n\n' "$_c_cmd_remote"
+    if $_c_qr; then
+      if command -v qrencode &>/dev/null; then
+        printf '  %bQR%b — scan with the iOS Camera, tap result, paste into Blink:\n' "$BOLD" "$NC"
+        qrencode -t ansiutf8 -- "$_c_cmd_mosh"
+        echo ""
+      else
+        warn "qrencode not installed — brew install qrencode  (then re-run with --qr)"
+      fi
+    elif command -v qrencode &>/dev/null; then
+      echo "  QR:  yaamux --connect --qr   (or  Ctrl+Space Q  from inside a yaamux session)"
+    else
+      echo "  QR:  brew install qrencode   (then: yaamux --connect --qr)"
+    fi
+    exit 0 ;;
+
+
   --auto-attach)
     # One snippet body that DTRT on phone, iPad, or desktop.  Detects the
     # client terminal's width and routes to --mobile-attach (zoom one pane),
@@ -1732,6 +1777,12 @@ tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
 tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
   "run-shell -b '${SELF} --restart-dead -y'"
 tmux bind-key      -T prefix L send-keys C-l \; clear-history
+# Connect info: prefix C → text popup, prefix Q → QR-code popup (if qrencode installed).
+# `read` keeps the popup open until the user dismisses with Enter.
+tmux bind-key      -T prefix C display-popup -E -w '90%' -h '70%' \
+  "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _"
+tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
+  "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _"
 tmux set-option    -t "$SESSION" mouse on
 tmux set-option    -t "$SESSION" monitor-activity on
 tmux set-option    -t "$SESSION" visual-activity off
@@ -1830,8 +1881,8 @@ else
 fi
 $HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
 echo ""
-echo -e " ${CYAN}Manage:${NC}  yaamux --send N \"x\" · --broadcast \"x\" · --restart N · --vscode N · --logs"
-echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach"
+echo -e " ${CYAN}Manage:${NC}  yaamux --send N \"x\" · --broadcast \"x\" · --restart N · --vscode N · --logs · --connect [--qr]"
+echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach · ${BOLD}C connect${NC} · ${BOLD}Q QR${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 

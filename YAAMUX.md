@@ -209,6 +209,30 @@ Then: `yaamux --remote work --list`, `yaamux --remote laptop --zoom 1`, etc.
 | **ntfy** | Push notifications (free) |
 | **Tailscale** | Zero-config networking (free) |
 
+### Show the connect commands (`--connect`, `prefix C`, QR)
+
+Anyone (you, a teammate, your phone) can copy the exact line they need to reach
+your host's yaamux sessions:
+
+```bash
+yaamux --connect              # prints mosh / ssh / --remote commands for this host
+yaamux --connect --qr         # …plus an ANSI QR of the mosh snippet (brew install qrencode)
+```
+
+Inside any running yaamux session, two prefix keybindings open a popup with the
+same output — no need to drop to a shell:
+
+| Key | Shows |
+|-----|-------|
+| `Ctrl+Space C` | Connect commands (mosh, ssh, `--remote`) |
+| `Ctrl+Space Q` | QR code of the mosh snippet (requires `qrencode`) |
+
+`prefix Q` is the fastest way to onboard a phone: scan with the iOS Camera app,
+tap the result, paste into Blink Shell. The QR encodes the full
+`mosh --server='…' user@host -- yaamux --auto-attach` line — so once scanned,
+the iPad/iPhone gets the right UI automatically (zoom on iPhone, grid on iPad,
+full grid on a tablet held in landscape with a tiny font).
+
 ### One snippet for every device (`--auto-attach`)
 
 `yaamux --auto-attach` reads the client terminal's width and routes to the
