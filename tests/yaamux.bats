@@ -82,6 +82,28 @@ teardown() {
   [[ "$output" == *"qrencode"* ]]
 }
 
+@test "--connect --qr encodes mosh:// (not the raw shell snippet → no Mail.app on iOS)" {
+  # Stub qrencode: print its argv so the test can assert on the QR payload.
+  # iOS Vision reads URL schemes (mosh://) as URLs; it would read the raw
+  # `mosh --server=… user@host.tld -- …` line as an email address and offer
+  # Mail.app — exactly the bug this payload format is meant to avoid.
+  stub_dir="$(mktemp -d -t yaamux-qrstub-XXXXXX)"
+  cat > "${stub_dir}/qrencode" << 'STUB'
+#!/usr/bin/env bash
+echo "QRENCODE_ARGS: $*"
+STUB
+  chmod +x "${stub_dir}/qrencode"
+
+  PATH="${stub_dir}:${PATH}" run_yaamux --connect --qr
+  [ "$status" -eq 0 ]
+  # QR must encode the mosh:// URL scheme.
+  [[ "$output" == *"QRENCODE_ARGS:"*"mosh://"* ]]
+  # ...and must NOT encode the raw shell command (which triggers iOS Mail.app).
+  [[ "$output" != *"QRENCODE_ARGS:"*"mosh --server="* ]]
+
+  rm -rf "$stub_dir"
+}
+
 @test "--list with no sessions reports empty (human)" {
   run_yaamux --list
   [ "$status" -eq 0 ]

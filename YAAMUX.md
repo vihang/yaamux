@@ -85,7 +85,7 @@ multiple repos simultaneously without collision.
 | `--auto-attach` | Attach with UI auto-picked by terminal width (iPhone / iPad / desktop) |
 | `--mobile-attach [repo] [pane]` | Attach with one pane zoomed (iPhone-friendly) |
 | `--mobile-grid` | Build the iPad umbrella session across every yaamux- session |
-| `--connect [--qr]` | Print exact connect commands (+ optional QR of the mosh snippet) |
+| `--connect [--qr]` | Print exact connect commands (+ optional QR encoding `mosh://user@host` for one-tap open in Blink / Prompt / Termius) |
 | `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
@@ -122,7 +122,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
-| `Ctrl+Space` + `Q` | QR-code popup of the mosh snippet (needs `qrencode`) |
+| `Ctrl+Space` + `Q` | QR popup encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
 | `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
 | `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
@@ -227,7 +227,8 @@ your host's yaamux sessions:
 
 ```bash
 yaamux --connect              # prints mosh / ssh / --remote commands for this host
-yaamux --connect --qr         # …plus an ANSI QR of the mosh snippet (brew install qrencode)
+yaamux --connect --qr         # …plus an ANSI QR encoding mosh://user@host — iOS Camera opens it
+                              #   in Blink / Prompt 3 / Termius with one tap (qrencode bundled by brew formula)
 ```
 
 Inside any running yaamux session, two prefix keybindings open a popup with the
@@ -236,13 +237,23 @@ same output — no need to drop to a shell:
 | Key | Shows |
 |-----|-------|
 | `Ctrl+Space C` | Connect commands (mosh, ssh, `--remote`) |
-| `Ctrl+Space Q` | QR code of the mosh snippet (requires `qrencode`) |
+| `Ctrl+Space Q` | QR encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
 
 `prefix Q` is the fastest way to onboard a phone: scan with the iOS Camera app,
-tap the result, paste into Blink Shell. The QR encodes the full
-`mosh --server='…' user@host -- yaamux --auto-attach` line — so once scanned,
-the iPad/iPhone gets the right UI automatically (zoom on iPhone, grid on iPad,
-full grid on a tablet held in landscape with a tiny font).
+tap the result, and Blink Shell (or Prompt 3 / Termius) opens with the mosh
+connection ready. Once you're at the remote shell, run `yaamux --auto-attach`
+to get the right UI for your device (zoom on iPhone, grid on iPad, full grid
+on a tablet held in landscape with a tiny font).
+
+The QR encodes `mosh://user@host` rather than the full shell snippet. iOS Vision
+recognizes URL schemes over email-address patterns, so the scan offers a one-tap
+"Open in <terminal>" action instead of misreading `user@host.tld` as an email
+and offering Mail.app. The trade-off: a URL scheme can't carry the
+`--server='export PATH=…; exec mosh-server'` PATH fix that the full snippet does.
+If the QR scan hits `NoMoshServerArgs` (typical on macOS Homebrew hosts where
+`mosh-server` sits in `/opt/homebrew/bin`, off SSH's default PATH), either copy
+the full mosh line printed above the QR — it bakes the PATH fix — or shim it
+once with `sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server`.
 
 **Cross-device handoff from iPad/phone**: the popup bindings also work *inside*
 the iPad's mobile-grid and the iPhone's mob-`$$` sessions (those sessions set

@@ -117,9 +117,9 @@ Inside any running yaamux session, hit `Ctrl+Space + Q`:
               (full QR)
 ```
 
-Open the iOS Camera, scan, tap, paste into [Blink Shell](https://blink.sh).
+Open the iOS Camera, scan, **tap** — Blink Shell (or Prompt 3 / Termius) opens with the mosh connection ready to go. Once you're at the shell, run `yaamux --auto-attach` and the phone gets the right UI automatically.
 
-The QR encodes the full `mosh --server='…' user@host -- yaamux --auto-attach` line — once scanned, the phone gets the right UI automatically.
+The QR encodes `mosh://user@host` so iOS routes the scan as a URL (one-tap "Open in Blink") instead of misreading `user@host.tld` as an email address. The full `mosh --server='…' -- yaamux --auto-attach` line — with the Homebrew PATH fix baked in — is still printed *above* the QR for desktop copy/paste, and it's the recommended path if you hit `NoMoshServerArgs` from a bare scan (the URL scheme can't carry the `--server` arg).
 
 ### Auto-route by terminal width — `--auto-attach`
 
@@ -254,7 +254,7 @@ ymx --status                     # health of this repo's session
 | `Ctrl+Space` + `L`      | Clear screen + scrollback                               |
 | `Ctrl+Space` + `d`      | Detach (agents keep running) — tmux default             |
 | `Ctrl+Space` + `C`      | **Connect-commands popup** (mosh · ssh · `--remote`)    |
-| `Ctrl+Space` + `Q`      | **QR popup** of the mosh snippet (needs `qrencode`)     |
+| `Ctrl+Space` + `Q`      | **QR popup** — scan with iOS Camera, opens `mosh://` in Blink / Prompt / Termius |
 | `Ctrl+Space` + `?`      | Cheat sheet (popup)                                     |
 | `Ctrl+Space` + `/`      | List every tmux binding                                 |
 | Mouse click             | Focus a pane                                            |
@@ -351,7 +351,9 @@ A `yaamux-guard.sh` hook blocks `rm -rf /`, `mkfs`, `dd of=/dev/…` etc. **for 
 
 `tmux` 3.2+ · `git` · `python3` · `curl` · at least one agent CLI (`claude`, `gemini`, `codex`, `copilot`).
 
-Optional: `gh` (for `--pr`) · `mosh` (sleep-safe remote) · `tailscale` (zero-config networking) · `qrencode` (for `--connect --qr`).
+Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`. If you install via `--install` (git clone) instead, grab `mosh` and `qrencode` yourself for `--remote --mosh` and `--connect --qr`.
+
+Always optional: `gh` (for `--pr`) · `tailscale` (zero-config networking).
 
 yaamux checks everything on launch and prints the install command for anything missing.
 
