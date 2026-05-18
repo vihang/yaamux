@@ -838,6 +838,41 @@ _host_helpers_body() {
   [ "$(_host_provider)" = "github" ]
 }
 
+# Drift-guard: every supported URL form must strip user@ and :port before
+# matching, so `ssh://git@github.com/foo/bar.git` and the SCP-style
+# `git@github.com:foo/bar.git` resolve to identical hosts (and identical
+# providers). Same for HTTPS basic-auth URLs.
+@test "_host_url_hostname: strips user@ and :port across schemes" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  # SCP-style — already known to work
+  [ "$(_host_url_hostname 'git@github.com:foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo
+  [ "$(_host_url_hostname 'ssh://git@github.com/foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo + port
+  [ "$(_host_url_hostname 'ssh://git@github.com:22/foo/bar.git')" = "github.com" ]
+  # https:// with basic auth
+  [ "$(_host_url_hostname 'https://user:pass@gitlab.example.com/foo/bar.git')" = "gitlab.example.com" ]
+  # Plain https://
+  [ "$(_host_url_hostname 'https://github.com/foo/bar.git')" = "github.com" ]
+  # Empty / unrecognized
+  [ "$(_host_url_hostname '')" = "" ]
+  [ "$(_host_url_hostname 'not-a-url')" = "" ]
+}
+
+# End-to-end via _host_provider: ssh:// with userinfo must route correctly
+# (was the original bug — `ssh://git@github.com/...` was hitting `other`).
+@test "_host_provider: ssh:// with user@ routes to the right forge" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  git -C "$TEST_REPO" remote add origin ssh://git@github.com/foo/bar.git
+  [ "$(_host_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin ssh://git@gitlab.com:22/foo/bar.git
+  [ "$(_host_provider)" = "gitlab" ]
+}
+
 @test "_host_cli: maps provider to gh / glab / empty" {
   eval "$(_host_helpers_body)"
   REPO_ROOT="$TEST_REPO"

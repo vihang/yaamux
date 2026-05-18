@@ -151,10 +151,17 @@ agent_idle_pattern() {
 _host_url_hostname() {
   local url="$1" rest
   case "$url" in
-    http://*|https://*) rest="${url#*://}";   echo "${rest%%/*}" ;;
-    ssh://*)            rest="${url#ssh://}"; echo "${rest%%/*}" ;;
-    *@*:*)              rest="${url#*@}";     echo "${rest%%:*}" ;;
-    *)                  echo "" ;;
+    http://*|https://*|ssh://*)
+      rest="${url#*://}"     # drop scheme
+      rest="${rest%%/*}"      # drop path
+      rest="${rest#*@}"       # drop optional user[:pass]@ userinfo
+      rest="${rest%%:*}"      # drop optional :port suffix
+      echo "$rest" ;;
+    *@*:*)
+      rest="${url#*@}"        # drop user@
+      echo "${rest%%:*}" ;;   # drop :path
+    *)
+      echo "" ;;
   esac
 }
 
