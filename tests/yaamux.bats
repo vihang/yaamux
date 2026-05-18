@@ -188,6 +188,27 @@ teardown() {
   [[ "$output" == *"numeric"* ]]
 }
 
+@test "--remote --zoom rejects 0 (must be 1-based)" {
+  run_yaamux --remote some-host --zoom 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"1-based"* ]]
+}
+
+@test "_remote_resolve_host: last line without trailing newline is honored" {
+  HOME_TMP="$(mktemp -d)"
+  mkdir -p "$HOME_TMP/.config/yaamux"
+  # printf — no trailing newline
+  printf 'work    vihang@work.example\nlast    user@last.example' \
+    > "$HOME_TMP/.config/yaamux/hosts.conf"
+  export HOME="$HOME_TMP"
+  HOSTS_CONF="$HOME_TMP/.config/yaamux/hosts.conf"
+  body="$(awk '/^_remote_resolve_host\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$(_remote_resolve_host work)" = "vihang@work.example" ]
+  [ "$(_remote_resolve_host last)" = "user@last.example" ]
+  rm -rf "$HOME_TMP"
+}
+
 @test "--remote-hosts on empty config prints setup instructions" {
   HOSTS_OVERRIDE="$(mktemp -d)/hosts.conf"
   HOME_TMP="$(mktemp -d)"

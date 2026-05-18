@@ -698,7 +698,7 @@ _remote_resolve_host() {
   [[ -z "$name" ]] && { echo ""; return; }
   if [[ -f "$HOSTS_CONF" ]]; then
     local line a t
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
       line="${line%%#*}"
       [[ -z "${line// /}" ]] && continue
       read -r a t <<< "$line"
@@ -850,7 +850,7 @@ _remote_hosts_show() {
   echo ""
   printf "  %-20s  %s\n" "ALIAS" "SSH-TARGET"
   local line a t
-  while IFS= read -r line; do
+  while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
     [[ -z "${line// /}" ]] && continue
     read -r a t <<< "$line"
@@ -929,7 +929,7 @@ tmux list-panes -t '${sess}:agents' -F '  pane #{pane_index}: #{pane_title}  dea
     --zoom)
       local n="${2:-}"
       [[ -z "$n" ]] && die "Usage: yaamux --remote <host> --zoom N [session]"
-      [[ "$n" =~ ^[0-9]+$ ]] || die "--zoom needs a numeric pane index (1-based)."
+      [[ "$n" =~ ^[1-9][0-9]*$ ]] || die "--zoom needs a numeric pane index (1-based)."
       local sess="${3:-}"
       [[ -z "$sess" ]] && { sess="$(_remote_pick_session "$target")" || return 1; }
       sess="$(_remote_normalize_session "$sess")"
