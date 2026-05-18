@@ -937,8 +937,9 @@ HELP
 # Dispatch --remote subcommands.   Args after '--remote' are passed verbatim.
 _remote_dispatch() {
   # Make sure the ssh ControlPath dir exists — sockets only created on demand
-  # but ssh needs the parent dir to be writable up front.
-  mkdir -p "$_REMOTE_SSH_SOCK_DIR" 2>/dev/null || true
+  # but ssh needs the parent dir to be writable up front. Let mkdir's error
+  # surface if creation fails (matches the other mkdir -p calls in this file).
+  mkdir -p "$_REMOTE_SSH_SOCK_DIR"
 
   local use_mosh="${YAAMUX_MOSH:-0}"
   local args=() a
