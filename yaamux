@@ -23,6 +23,7 @@
 #    yaamux --attach | --kill | --clean | --status | --list [--json]
 #    yaamux --zoom N | --vscode N | --send N "x" | --exec N "x" | --broadcast "x"
 #    yaamux --restart N | --restart-dead [-y] | --logs | --sync | --pr N [title] [--merge]
+#    yaamux --watch-pr N | --auto-merge N | --ci-status [N] | --diff N
 #    yaamux --setup-notify | --ssh-config | --install-service
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
@@ -129,6 +130,63 @@ agent_idle_pattern() {
     copilot) echo '^>[[:space:]]*$' ;;
     codex)   echo '^>[[:space:]]*$' ;;
     *)       echo '^>[[:space:]]*$' ;;
+  esac
+}
+
+# ── Git host helpers ──────────────────────────────────────────────────────────
+# Mirrors the agent_* triad: one switch per provider per op. Every call into a
+# host CLI (gh, glab, …) goes through this family — never inline `gh`/`glab`
+# elsewhere. Adding GitLab later = filling in the `gitlab)` cases here.
+# Override auto-detection with $YAAMUX_GIT_HOST.
+_host_provider() {
+  [[ -n "${YAAMUX_GIT_HOST:-}" ]] && { echo "$YAAMUX_GIT_HOST"; return; }
+  local url; url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  case "$url" in
+    *github.com*)            echo github ;;
+    *gitlab.com*|*gitlab.*)  echo gitlab ;;
+    *)                       echo other  ;;
+  esac
+}
+_host_cli() {
+  case "$(_host_provider)" in
+    github) echo gh   ;;
+    gitlab) echo glab ;;
+    *)      echo ""   ;;
+  esac
+}
+# PR create — $1=wt $2=base $3=branch $4=title(opt). Echoes PR URL on success.
+_host_pr_create() {
+  case "$(_host_provider)" in
+    github)
+      local args=(--fill --base "$2" --head "$3")
+      [[ -n "${4:-}" ]] && args+=(--title "$4")
+      gh pr create "${args[@]}" ;;
+    *) die "PR create not implemented for $(_host_provider). Set YAAMUX_GIT_HOST or open the PR manually." ;;
+  esac
+}
+# PR lookup — $1=wt → echoes PR URL for the worktree's current branch.
+_host_pr_url() {
+  case "$(_host_provider)" in
+    github) gh -R "$(git -C "$1" remote get-url origin)" pr view --json url -q .url ;;
+    *)      die "PR lookup not implemented for $(_host_provider)." ;;
+  esac
+}
+_host_pr_checks_watch() {
+  case "$(_host_provider)" in
+    github) gh pr checks --watch "$1" ;;
+    *)      die "PR checks --watch not implemented for $(_host_provider)." ;;
+  esac
+}
+_host_pr_merge_auto() {
+  case "$(_host_provider)" in
+    github) gh pr merge --squash --auto "$1" ;;
+    *)      die "PR auto-merge not implemented for $(_host_provider)." ;;
+  esac
+}
+_host_pr_ci_status() {
+  case "$(_host_provider)" in
+    github) gh pr checks "$1" ;;
+    *)      die "PR CI status not implemented for $(_host_provider)." ;;
   esac
 }
 
@@ -1352,21 +1410,54 @@ _pr_pane() {
   local agent="agent-$((idx+1))"
   local branch="worktree/${agent}"
   local wt="${WORKTREES_BASE}/${agent}"
-  command -v gh &>/dev/null || die "gh CLI not found — brew install gh; gh auth login"
+  local cli; cli="$(_host_cli)"
+  [[ -n "$cli" ]] || die "No git host CLI configured (provider: $(_host_provider))."
+  command -v "$cli" &>/dev/null || die "${cli} not found — brew install ${cli}; ${cli} auth login"
   [[ -d "$wt" ]] || die "Worktree $wt not found."
   local base="${YAAMUX_DEFAULT_BASE:-origin/main}"; base="${base#origin/}"
   log "Pushing ${branch} to origin..."
   git -C "$wt" push -u origin "$branch" || die "git push failed."
   log "Creating PR (base: ${base})..."
-  local pr_args=(--fill --base "$base" --head "$branch")
-  [[ -n "$title" ]] && pr_args+=(--title "$title")
   local pr_url
-  pr_url="$(gh pr create "${pr_args[@]}")" || die "gh pr create failed."
+  pr_url="$(_host_pr_create "$wt" "$base" "$branch" "$title")" || die "PR create failed."
   echo "$pr_url"
   if [[ "$merge" == "true" ]]; then
     log "Enabling auto-merge (squash)..."
-    gh pr merge --squash --auto "$pr_url" || die "gh pr merge --auto failed."
+    _host_pr_merge_auto "$pr_url" || die "auto-merge failed."
     log "Auto-merge enabled. Run 'yaamux --clean' after merge completes to remove the worktree."
+  fi
+}
+
+# Resolve a 0-based agent ordinal to "wt|branch|pr_url". Does NOT consult tmux —
+# the disk-based agent-N convention is independent of where any tmux pane sits
+# (same rationale as --pr's comment above).
+# stderr from _host_pr_url is intentionally NOT suppressed so the underlying
+# error (e.g. "PR lookup not implemented for gitlab" or gh's "no pull requests
+# found for branch …") reaches the user; we just add the follow-up hint.
+_pane_pr() {
+  local idx="$1" wt branch url
+  wt="${WORKTREES_BASE}/agent-$((idx+1))"
+  branch="worktree/agent-$((idx+1))"
+  [[ -d "$wt" ]] || die "Worktree $wt not found."
+  url="$(_host_pr_url "$wt")" \
+    || die "No PR for ${branch} (open one with: yaamux --pr $((idx+1)))"
+  echo "${wt}|${branch}|${url}"
+}
+_watch_pr_pane()   { local r; r="$(_pane_pr "$1")"; _host_pr_checks_watch "${r##*|}"; }
+_auto_merge_pane() { local r; r="$(_pane_pr "$1")"; _host_pr_merge_auto   "${r##*|}"; }
+_ci_status_pane()  { local r; r="$(_pane_pr "$1")"; _host_pr_ci_status    "${r##*|}"; }
+
+# Diff vs origin/main for agent N's worktree. Pipes through delta if installed
+# (forces color so delta lights up); else falls back to git's own pager.
+_diff_pane() {
+  local idx="$1" wt base
+  wt="${WORKTREES_BASE}/agent-$((idx+1))"
+  base="${YAAMUX_DEFAULT_BASE:-origin/main}"
+  [[ -d "$wt" ]] || die "Worktree $wt not found."
+  if command -v delta &>/dev/null; then
+    git -C "$wt" -c color.ui=always diff "${base}...HEAD" | delta
+  else
+    git -C "$wt" diff "${base}...HEAD"
   fi
 }
 
@@ -1670,7 +1761,7 @@ STATE_EOF
   # .gitignore additions (only if .gitignore is present)
   if [[ -f "${REPO_ROOT}/.gitignore" ]]; then
     local added=0
-    for entry in ".claude/logs/" "../${PROJECT_NAME}-worktrees/" ".yaamux/state" ".yaamux/panels/"; do
+    for entry in ".claude/logs/" "../${PROJECT_NAME}-worktrees/" ".yaamux/state" ".yaamux/panels/" ".yaamux/lazygit/"; do
       if ! grep -qxF "$entry" "${REPO_ROOT}/.gitignore"; then
         echo "$entry" >> "${REPO_ROOT}/.gitignore"
         added=$((added+1))
@@ -2020,6 +2111,7 @@ In-session keys (press Ctrl+Space, then the key):
   D            detach (agents keep running)
   C            connect-commands popup (mosh / ssh / --remote lines)
   Q            QR-code popup — scan with iOS Camera → opens mosh:// in Blink / Prompt
+  G            jump to the `git` window (lazygit · worktrees · branches · PRs)
   ?            this cheat sheet
   /            list all tmux key bindings
   Mouse click  focus a pane
@@ -2043,6 +2135,10 @@ yaamux CLI (from any shell inside the repo):
   yaamux --vscode N                 open pane N's worktree in VS Code
   yaamux --logs                     tail combined agent logs
   yaamux --pr N [title] [--merge]   push + open PR for pane N
+  yaamux --watch-pr N               watch CI for pane N's PR (blocks until done)
+  yaamux --auto-merge N             enable auto-merge on pane N's PR
+  yaamux --ci-status [N]            CI status — one pane, or all panes
+  yaamux --diff N                   diff vs origin/main for pane N (delta-highlighted)
   yaamux --toggle-panel             show/hide the Control Panel pane
   yaamux --panel-show               show the Control Panel pane
   yaamux --panel-hide               hide the Control Panel pane
@@ -2274,6 +2370,35 @@ case "${1:-}" in
     done
     _pr_pane "$IDX" "$TITLE" "$MERGE"
     exit $? ;;
+
+  --watch-pr)
+    # Same disk-based convention as --pr: 0-based agent ordinal, independent
+    # of tmux pane positions (so the Control Panel pane doesn't shift things).
+    IDX=$(( ${2:?Usage: yaamux --watch-pr N} - 1 ))
+    _watch_pr_pane "$IDX"; exit $? ;;
+
+  --auto-merge)
+    IDX=$(( ${2:?Usage: yaamux --auto-merge N} - 1 ))
+    _auto_merge_pane "$IDX"; exit $? ;;
+
+  --ci-status)
+    if [[ -n "${2:-}" ]]; then
+      IDX=$(( $2 - 1 )); _ci_status_pane "$IDX"; exit $?
+    else
+      # No N — iterate every worktree on disk. Subshell isolates die() inside
+      # _pane_pr so one missing PR doesn't abort the loop.
+      for ((i=0; i<MAX_AGENTS; i++)); do
+        [[ -d "${WORKTREES_BASE}/agent-$((i+1))" ]] || continue
+        printf '\n── agent-%d ──\n' "$((i+1))"
+        ( _ci_status_pane "$i" 2>&1 ) || true
+      done
+      exit 0
+    fi ;;
+
+  --diff)
+    IDX=$(( ${2:?Usage: yaamux --diff N} - 1 ))
+    _diff_pane "$IDX"; exit $? ;;
+
   --ssh-config)     _gen_ssh_config;      exit 0 ;;
   --install-service) _install_launchagent; exit 0 ;;
   --prepare-host)   _prepare_host_mosh "${2:-apply}"; exit $? ;;
@@ -2784,6 +2909,12 @@ fi
 
 MOSH_OK=false
 command -v mosh &>/dev/null && MOSH_OK=true || warn "mosh not found — brew install mosh"
+# New-stack soft deps: warn but don't die. lazygit drives the `git` window;
+# gh backs the PR/CI flags; delta/bat polish diffs and file viewing in panes.
+command -v lazygit &>/dev/null || warn "lazygit not found — \`git\` window will be skipped. (brew install lazygit)"
+command -v gh      &>/dev/null || warn "gh not found — --pr/--watch-pr/--auto-merge/--ci-status will fail. (brew install gh && gh auth login)"
+command -v delta   &>/dev/null || warn "git-delta not found — diffs will render plain. (brew install git-delta)"
+command -v bat     &>/dev/null || warn "bat not found — files will page through less. (brew install bat)"
 # If mosh is installed but mosh-server isn't on ssh's non-interactive PATH,
 # iOS clients opening the QR'd `mosh://user@host` URL will hit NoMoshServerArgs.
 # This is the v0.1.8 trade-off: the URL scheme can't carry the --server= PATH
@@ -2869,6 +3000,15 @@ tmux set-option -t "$SESSION" @yaamux-repo "$REPO_ROOT"
 tmux set-option -t "$SESSION" @yaamux-shells \
   "zsh bash sh fish dash ash $(basename "${SHELL:-zsh}" 2>/dev/null || echo zsh)"
 
+# Wire delta + bat into the session env if installed. New processes spawned
+# in any pane inherit these; the user's global gitconfig is untouched.
+# (lazygit ignores GIT_PAGER — its delta wiring is via the repo-local config
+# written below when the `git` window is created.)
+command -v delta &>/dev/null && \
+  tmux set-environment -t "$SESSION" GIT_PAGER "delta --paging=never"
+command -v bat &>/dev/null && \
+  tmux set-environment -t "$SESSION" PAGER "bat --paging=auto"
+
 # Options
 tmux set-option -g -t "$SESSION" history-limit $SCROLLBACK
 tmux set-option    -t "$SESSION" prefix C-Space
@@ -2896,6 +3036,9 @@ tmux bind-key      -T prefix C display-popup -E -w '90%' -h '70%' \
   "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
 tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
   "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
+# Jump to the lazygit `git` window. Silent no-op if lazygit isn't installed
+# (the window doesn't exist).
+tmux bind-key      -T prefix G select-window -t "${SESSION}:git" 2>/dev/null || true
 # Control Panel: prefix p toggles show/hide; remembers via .yaamux/state.
 tmux bind-key      -T prefix p run-shell -b "${SELF} --toggle-panel"
 # Ergonomic zoom toggle — Ctrl+Space → Space is a one-handed double-tap.
@@ -3023,6 +3166,33 @@ for ((i=1; i<N; i++)); do
   tmux select-layout -t "${SESSION}:logs" tiled
 done
 tmux select-layout -t "${SESSION}:logs" tiled
+
+# `git` window — one lazygit pane in REPO_ROOT (worktrees + branches + PRs).
+# Distinct from the Control Panel *pane* (which lives in the `agents` window
+# and shows yaamux/tmux state): this is a dedicated window for git ops,
+# jumped to via `Ctrl+Space + G`. Lazygit ignores $GIT_PAGER and reads its
+# own config, so we drop a repo-local config under .yaamux/ (matches the
+# convention .yaamux/state, .yaamux/panels/, etc.) and point LG_CONFIG_FILE
+# at it — no global ~/.config/lazygit changes.
+if command -v lazygit &>/dev/null; then
+  _LG_CONFIG_DIR="${REPO_ROOT}/.yaamux/lazygit"
+  mkdir -p "$_LG_CONFIG_DIR"
+  if command -v delta &>/dev/null; then
+    cat > "${_LG_CONFIG_DIR}/config.yml" <<'LG_EOF'
+git:
+  paging:
+    colorArg: always
+    pager: delta --dark --paging=never
+LG_EOF
+  else
+    : > "${_LG_CONFIG_DIR}/config.yml"
+  fi
+  tmux new-window  -t "$SESSION" -n "git" -c "$REPO_ROOT"
+  tmux set-window-option -t "${SESSION}:git" pane-base-index 0 2>/dev/null || true
+  tmux select-pane -t "${SESSION}:git.0" -T "🧭 lazygit · ${PROJECT_NAME}"
+  tmux send-keys   -t "${SESSION}:git" \
+    "LG_CONFIG_FILE='${_LG_CONFIG_DIR}/config.yml' lazygit" Enter
+fi
 
 # Keep dead agent panes visible (showing tmux's exit banner) instead of
 # collapsing the tiled grid, so the user sees what died and --restart-dead

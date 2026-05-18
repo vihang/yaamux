@@ -113,6 +113,14 @@ explicit instruction to do so.
    three functions: `agent_bin`, `agent_icon`, `agent_cmd`. Nothing else
    should branch on agent type.
 
+   The same rule applies to the **git host**. Every call into a host CLI
+   (`gh`, `glab`, …) goes through the `_host_*` dispatch family
+   (`_host_provider`, `_host_cli`, `_host_pr_create`, `_host_pr_url`,
+   `_host_pr_checks_watch`, `_host_pr_merge_auto`, `_host_pr_ci_status`).
+   Adding GitLab support = filling in the `gitlab)` case in each — never
+   inline `gh` or `glab` outside this family. Auto-detection reads
+   `git remote get-url origin`; override with `$YAAMUX_GIT_HOST`.
+
 8. **Tiled layout.** Pane grid is built by repeated `split-window` +
    `select-layout tiled`. Never hard-code a 2×2 (or any fixed) geometry —
    yaamux supports 1–20 agents.
@@ -155,7 +163,8 @@ The `yaamux` file is ordered top-to-bottom as:
 | Self-location | `SELF`, `YAAMUX_HOME` — resolve real path through the symlink |
 | Project context | `REPO_ROOT`, `SESSION`, `WORKTREES_BASE`, paths |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
-| `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
+| `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only agent-type switch |
+| `_host_*` helpers | `_host_provider` / `_host_cli` / `_host_pr_*` — the only git-host switch (PR/CI ops) |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
 | Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` / `_prepare_host_mosh` (host-level mosh-server PATH fix for `mosh://` URLs) |
 | Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |

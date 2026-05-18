@@ -793,3 +793,116 @@ PY
   [ "$status" -eq 0 ]
   grep -qxF ".yaamux/panels/" .gitignore
 }
+
+# ── Git-host abstraction (_host_provider / _host_cli) ─────────────────────────
+
+@test "_host_provider: explicit YAAMUX_GIT_HOST overrides auto-detection" {
+  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_GIT_HOST=gitlab; [ "$(_host_provider)" = "gitlab" ]
+  YAAMUX_GIT_HOST=github; [ "$(_host_provider)" = "github" ]
+  YAAMUX_GIT_HOST=other ; [ "$(_host_provider)" = "other"  ]
+}
+
+@test "_host_provider: auto-detects github and gitlab from origin URL" {
+  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  git -C "$TEST_REPO" remote add origin https://github.com/foo/bar.git
+  [ "$(_host_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin git@gitlab.com:foo/bar.git
+  [ "$(_host_provider)" = "gitlab" ]
+  git -C "$TEST_REPO" remote set-url origin https://bitbucket.org/foo/bar.git
+  [ "$(_host_provider)" = "other" ]
+}
+
+@test "_host_cli: maps provider to gh / glab / empty" {
+  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  body+=$'\n'"$(awk '/^_host_cli\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_GIT_HOST=github; [ "$(_host_cli)" = "gh"   ]
+  YAAMUX_GIT_HOST=gitlab; [ "$(_host_cli)" = "glab" ]
+  YAAMUX_GIT_HOST=other ; [ "$(_host_cli)" = ""     ]
+}
+
+# ── New PR/CI/diff flags — usage validation ───────────────────────────────────
+
+@test "--watch-pr without N fails with usage hint" {
+  run_yaamux --watch-pr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --watch-pr N"* ]]
+}
+
+@test "--auto-merge without N fails with usage hint" {
+  run_yaamux --auto-merge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --auto-merge N"* ]]
+}
+
+@test "--diff without N fails with usage hint" {
+  run_yaamux --diff
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --diff N"* ]]
+}
+
+@test "--ci-status with no N exits 0 when there are no worktrees" {
+  run_yaamux --ci-status
+  [ "$status" -eq 0 ]
+}
+
+@test "--diff N dies clean when the worktree is missing" {
+  run_yaamux --diff 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Worktree"* ]]
+  [[ "$output" == *"not found"* ]]
+}
+
+@test "--watch-pr N dies clean when the worktree is missing" {
+  run_yaamux --watch-pr 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Worktree"* ]]
+  [[ "$output" == *"not found"* ]]
+}
+
+# Pluggability proof: YAAMUX_GIT_HOST=gitlab routes into the gitlab) case in
+# every _host_pr_* helper. Currently those cases die with "not implemented";
+# a future change that wires up `glab` should update this test to assert
+# success instead of the placeholder message.
+@test "YAAMUX_GIT_HOST=gitlab routes PR ops into the gitlab) dispatch" {
+  wt_base="$(dirname "$TEST_REPO")/$(basename "$TEST_REPO")-worktrees"
+  mkdir -p "${wt_base}/agent-1"
+  YAAMUX_GIT_HOST=gitlab run_yaamux --watch-pr 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not implemented"* ]]
+  rm -rf "$wt_base"
+}
+
+# ── --keys / --help advertise the new surface ─────────────────────────────────
+
+@test "--keys lists the new PR/CI/diff flags and the \`git\` window binding" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--watch-pr"* ]]
+  [[ "$output" == *"--auto-merge"* ]]
+  [[ "$output" == *"--ci-status"* ]]
+  [[ "$output" == *"--diff N"* ]]
+  [[ "$output" == *"\`git\` window"* ]]
+}
+
+@test "--help header advertises the new flags" {
+  run_yaamux --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--watch-pr"* ]]
+  [[ "$output" == *"--ci-status"* ]]
+  [[ "$output" == *"--diff"* ]]
+}
+
+@test "--init adds .yaamux/lazygit/ to .gitignore" {
+  touch .gitignore
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -qxF ".yaamux/lazygit/" .gitignore
+}

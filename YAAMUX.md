@@ -71,6 +71,10 @@ multiple repos simultaneously without collision.
 | `--exec N "x" [timeout]` | Headless: send, poll for idle, return output (5min default) |
 | `--broadcast "x"` | Send the same prompt to every pane |
 | `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
+| `--watch-pr N` | Watch CI for pane N's PR — blocks until pass / fail |
+| `--auto-merge N` | Enable auto-merge (squash) on pane N's existing PR |
+| `--ci-status [N]` | CI status table — one pane, or every pane that has a PR |
+| `--diff N` | Diff pane N's branch vs `origin/main` (delta-highlighted if installed) |
 | `--restart N` | Restart pane N (relaunches its agent type) |
 | `--restart-dead [-y]` | Restart every pane whose agent has exited or died (`-y` skips confirm) |
 | `--toggle-panel` | Show/hide the Control Panel pane (persists via `.yaamux/state`) |
@@ -173,6 +177,7 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `d` | Detach (agents keep running) — tmux default |
 | `Ctrl+Space` + `C` | Connect-commands popup (mosh / ssh / `--remote` lines) |
 | `Ctrl+Space` + `Q` | QR popup encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
+| `Ctrl+Space` + `G` | Jump to the **`git` window** — lazygit (worktrees · branches · PRs) |
 | `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
 | `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
@@ -504,6 +509,58 @@ tmux status-right shows one chip per agent pane — `[1✓]` running, `[2⚠]`
 idle, `[3✗]` dead, `[4!]` notification pending (magenta). `Ctrl+Space + N`
 jumps straight to agent pane `N`, so an unread notification is one chord
 away. Focusing a pane clears its `!` badge.
+
+---
+
+## Git window
+
+A separate tmux window named `git` running **lazygit** in `REPO_ROOT`. Covers
+worktree status / branches / staging / diffs / file viewing in one always-
+available place — closest in-terminal analogue to the Claude Code desktop
+sidebar. Distinct from the Control Panel *pane* above: the Control Panel
+shows yaamux/tmux state inside the `agents` window; the `git` window is a
+dedicated window for git operations.
+
+Jump to it with `Ctrl+Space + G`. The window is only created at session start
+if `lazygit` is installed; otherwise it's silently skipped.
+
+Lazygit ignores `$GIT_PAGER`, so when `git-delta` is installed yaamux writes
+a tiny repo-local config to `.yaamux/lazygit/config.yml` and points
+`LG_CONFIG_FILE` at it. Your global `~/.config/lazygit/` is untouched.
+The config directory is gitignored by `yaamux --init`.
+
+### Git-host operations from the CLI
+
+Four new flags wrap `gh` for common per-pane git-host operations. Each takes
+a 1-based agent number — they look up `agent-N` on disk (same convention as
+`--pr`), so they're independent of where any tmux pane sits.
+
+```bash
+yaamux --watch-pr 2      # gh pr checks --watch — blocks until CI completes
+yaamux --auto-merge 2    # gh pr merge --squash --auto on the existing PR
+yaamux --ci-status       # table of CI checks for every pane that has a PR
+yaamux --ci-status 2     # CI checks for just pane 2's PR
+yaamux --diff 2          # git diff origin/main...HEAD piped through delta
+```
+
+Diffs are also auto-piped through `delta` from any shell inside the session
+(yaamux sets `GIT_PAGER=delta` and `PAGER=bat` as session env vars when those
+binaries are installed — no global gitconfig changes).
+
+### Pluggable git host
+
+All four flags + `--pr` route through a small dispatch family
+(`_host_provider` / `_host_cli` / `_host_pr_*`) instead of inlining `gh`.
+Adding GitLab later means filling in the `gitlab)` case in each helper —
+no other call site touches the host CLI directly. The provider is auto-
+detected from `git remote get-url origin`; override with `YAAMUX_GIT_HOST`:
+
+```bash
+YAAMUX_GIT_HOST=gitlab yaamux --watch-pr 1
+# → dies with "PR checks --watch not implemented for gitlab."  (placeholder)
+```
+
+This is the follow-up flagged in #25 ("pluggable provider architecture").
 
 ---
 

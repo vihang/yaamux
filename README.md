@@ -283,6 +283,7 @@ ymx --status                     # health of this repo's session
 | `Ctrl+Space` + `d`      | Detach (agents keep running) — tmux default             |
 | `Ctrl+Space` + `C`      | **Connect-commands popup** (mosh · ssh · `--remote`)    |
 | `Ctrl+Space` + `Q`      | **QR popup** — scan with iOS Camera, opens `mosh://` in Blink / Prompt / Termius |
+| `Ctrl+Space` + `G`      | **`git` window** — lazygit · worktrees · branches · PRs |
 | `Ctrl+Space` + `?`      | Cheat sheet (popup)                                     |
 | `Ctrl+Space` + `/`      | List every tmux binding                                 |
 | Mouse click             | Focus a pane                                            |
@@ -308,6 +309,8 @@ Run `ymx --keys` from any shell for the same cheat sheet — no tmux needed.
 | `ymx --send N "x"` / `--broadcast "x"`              | Inject a prompt into one pane / every pane                           |
 | `ymx --exec N "x" [timeout]`                        | Headless: send, wait for idle, return output (default 5 min)         |
 | `ymx --pr N [title] [--merge]`                      | Push pane N's branch + open PR via `gh`                              |
+| `ymx --watch-pr N` / `--auto-merge N`               | Watch CI / enable auto-merge on pane N's PR                          |
+| `ymx --ci-status [N]` / `--diff N`                  | CI status (one or all) / branch diff vs `origin/main` (delta)        |
 | `ymx --restart N` / `--restart-dead [-y]`           | Heal panes                                                           |
 | `ymx --logs` / `--sync`                             | Live-log window / toggle keystroke sync                              |
 | `ymx --yolo …` / `--link-env …`                     | Modifiers — combine with positional args                             |
@@ -381,9 +384,9 @@ A `yaamux-guard.sh` hook blocks `rm -rf /`, `mkfs`, `dd of=/dev/…` etc. **for 
 
 `tmux` 3.2+ · `git` · `python3` · `curl` · at least one agent CLI (`claude`, `gemini`, `codex`, `copilot`).
 
-Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`. If you install via `--install` (git clone) instead, grab `mosh` and `qrencode` yourself for `--remote --mosh` and `--connect --qr`.
+Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`, `lazygit`, `gh`, `git-delta`, `bat`. If you install via `--install` (git clone) instead, grab those yourself — yaamux degrades gracefully (the `git` window is skipped without `lazygit`; PR flags fail with a clear error without `gh`; diffs and file viewing fall back to plain output without `delta` / `bat`).
 
-Always optional: `gh` (for `--pr`) · `tailscale` (zero-config networking).
+Always optional: `tailscale` (zero-config networking).
 
 yaamux checks everything on launch and prints the install command for anything missing.
 
