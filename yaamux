@@ -6,7 +6,7 @@
 #  grid. Manage them locally or from any device. Install once, use in every repo.
 #
 #  Invoke as either `yaamux` or `ymx` — same script, same flags.
-#  Supported agents:  claude · gemini · copilot · codex
+#  Supported agents:  claude · gemini · copilot · codex · opencode
 #
 #  ── Install (once) ──────────────────────────────────────────────────────────
 #    git clone <yaamux-repo> ~/.yaamux
@@ -87,6 +87,8 @@ COPILOT_FLAGS_SAFE="--allow-tool 'shell(git:*)'"
 COPILOT_FLAGS_YOLO="--allow-all-tools"
 CODEX_FLAGS_SAFE="--full-auto"
 CODEX_FLAGS_YOLO="--dangerously-bypass-approvals-and-sandbox"
+OPENCODE_FLAGS_SAFE=""
+OPENCODE_FLAGS_YOLO=""
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'
 BOLD='\033[1m'; NC='\033[0m'
@@ -98,20 +100,23 @@ header() { echo -e "\n${BOLD}${CYAN}── $* ${NC}"; }
 
 # ── Agent helpers ─────────────────────────────────────────────────────────────
 agent_bin()  { case "$1" in claude)echo claude;; gemini)echo gemini;;
-                            copilot)echo copilot;; codex)echo codex;; *)echo "";; esac; }
+                            copilot)echo copilot;; codex)echo codex;;
+                            opencode)echo opencode;; *)echo "";; esac; }
 agent_icon() { case "$1" in claude)echo "🤖";; gemini)echo "✦";;
-                            copilot)echo "🐙";; codex)echo "⬡";; *)echo "❓";; esac; }
+                            copilot)echo "🐙";; codex)echo "⬡";;
+                            opencode)echo "◉";; *)echo "❓";; esac; }
 agent_flags() {
   # Pick per-agent flag profile based on YAAMUX_YOLO (set by --yolo or env).
   local type="$1" suffix="SAFE"
   [[ "${YAAMUX_YOLO:-0}" == "1" ]] && suffix="YOLO"
   local var
   case "$type" in
-    claude)  var="CLAUDE_FLAGS_${suffix}" ;;
-    gemini)  var="GEMINI_FLAGS_${suffix}" ;;
-    copilot) var="COPILOT_FLAGS_${suffix}" ;;
-    codex)   var="CODEX_FLAGS_${suffix}" ;;
-    *)       echo ""; return ;;
+    claude)   var="CLAUDE_FLAGS_${suffix}" ;;
+    gemini)   var="GEMINI_FLAGS_${suffix}" ;;
+    copilot)  var="COPILOT_FLAGS_${suffix}" ;;
+    codex)    var="CODEX_FLAGS_${suffix}" ;;
+    opencode) var="OPENCODE_FLAGS_${suffix}" ;;
+    *)        echo ""; return ;;
   esac
   echo "${!var}"
 }
@@ -119,22 +124,24 @@ agent_cmd()  {
   local type="$1" name="$2" flags
   flags="$(agent_flags "$type")"
   case "$type" in
-    claude)  echo "claude ${flags} --remote-control '${PROJECT_NAME}-${name}'" ;;
-    gemini)  echo "gemini ${flags}" ;;
-    copilot) echo "copilot ${flags} --remote" ;;
-    codex)   echo "codex ${flags}" ;;
-    *)       echo "echo 'Unknown agent type: ${type}'" ;;
+    claude)   echo "claude ${flags} --remote-control '${PROJECT_NAME}-${name}'" ;;
+    gemini)   echo "gemini ${flags}" ;;
+    copilot)  echo "copilot ${flags} --remote" ;;
+    codex)    echo "codex ${flags}" ;;
+    opencode) echo "opencode ${flags}" ;;
+    *)        echo "echo 'Unknown agent type: ${type}'" ;;
   esac
 }
 # Regex matched against the last non-empty captured line to detect "agent idle".
 # Imperfect — tune per agent as their TUIs evolve. Used by --exec polling.
 agent_idle_pattern() {
   case "$1" in
-    claude)  echo '╰─.*─╯|^>[[:space:]]*$' ;;
-    gemini)  echo '^>[[:space:]]*$|gemini>' ;;
-    copilot) echo '^>[[:space:]]*$' ;;
-    codex)   echo '^>[[:space:]]*$' ;;
-    *)       echo '^>[[:space:]]*$' ;;
+    claude)   echo '╰─.*─╯|^>[[:space:]]*$' ;;
+    gemini)   echo '^>[[:space:]]*$|gemini>' ;;
+    copilot)  echo '^>[[:space:]]*$' ;;
+    codex)    echo '^>[[:space:]]*$' ;;
+    opencode) echo '^>[[:space:]]*$' ;;
+    *)        echo '^>[[:space:]]*$' ;;
   esac
 }
 
@@ -265,6 +272,115 @@ forge_pr_ci_status() {
     gitea)  die "forge_pr_ci_status for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
     *)      die "PR CI status not implemented for $(forge_provider)." ;;
   esac
+}
+
+# ── Pilot helpers ─────────────────────────────────────────────────────────────
+# Pilot = an agent CLI running in the control-panel pane that orchestrates the
+# other agent panes via the existing yaamux flag surface (--list, --send,
+# --send-stdin, --broadcast, --restart, --goto, …). No API key — the agent
+# CLI's own auth handles the LLM call.
+#
+# PILOT_BACKENDS_DEFAULT lists backends whose orchestrator prompt is actually
+# wired in `pilot_cmd`. Currently that's claude only — its
+# `--append-system-prompt` flag is well-supported and stable. Other backends
+# (codex, gemini, copilot, opencode) are still selectable via an explicit
+# `yaamux --pilot-show <backend>`, but auto-selection skips them so a user
+# without claude isn't dropped into an unprompted pilot.
+PILOT_BACKENDS_DEFAULT="claude"
+PILOT_BACKENDS_KNOWN="claude codex gemini copilot opencode"
+PILOT_PROMPT_FILE="${HOME}/.config/yaamux/pilot-prompt.md"
+
+# Echo space-separated list of pilot backends actually installed on this box.
+# Considers the full known set (`PILOT_BACKENDS_KNOWN`), not just the
+# auto-selection default — `yaamux --pilot-show <backend>` works for any of
+# these, even if `pilot_cmd` doesn't yet pass an orchestrator prompt for it.
+pilot_supported() {
+  local b out=""
+  for b in $PILOT_BACKENDS_KNOWN; do
+    command -v "$(agent_bin "$b")" >/dev/null 2>&1 && out+="$b "
+  done
+  echo "${out% }"
+}
+
+# Cheap usability probe — bin exists and `--help` runs. We don't probe specific
+# flags yet; vendors change them too often. If a backend's CLI fundamentally
+# can't take a custom system prompt or auto-shell, surface that via docs.
+pilot_probe() {
+  local backend="$1" bin
+  bin="$(agent_bin "$backend")"
+  [[ -z "$bin" ]] && return 1
+  command -v "$bin" >/dev/null 2>&1
+}
+
+# Compose the shell command that launches a pilot. Output is passed verbatim
+# to `tmux respawn-pane -k`, which runs it as a shell. Single-quote anything
+# that might contain spaces.
+#
+# Notes:
+#   * Resume IDs aren't wired — each backend's CLI has its own way of
+#     identifying a prior conversation, and capture requires parsing the
+#     backend's first-output banner, which differs per CLI and changes
+#     between releases. Toggling out and back into the pilot starts a fresh
+#     conversation today.
+#   * Only the `claude` arm currently passes the orchestrator prompt via
+#     `--append-system-prompt`. codex / gemini / copilot / opencode launch
+#     without orchestrator framing — they're accepted by --pilot-show but
+#     auto-selection skips them (see PILOT_BACKENDS_DEFAULT). Adding a
+#     wired prompt for one of these = pick the right CLI flag and emit
+#     it from the matching case arm below.
+pilot_cmd() {
+  local backend="$1" flags
+  [[ -f "$PILOT_PROMPT_FILE" ]] || _write_pilot_prompt
+  case "$backend" in
+    claude)
+      flags="--append-system-prompt \"\$(cat '${PILOT_PROMPT_FILE}')\" --dangerously-skip-permissions"
+      echo "claude ${flags}"
+      ;;
+    codex)
+      # No --append-system-prompt equivalent yet; orchestrator framing absent.
+      echo "codex --full-auto"
+      ;;
+    gemini)
+      # --yolo bypasses per-tool approval. Orchestrator framing absent.
+      echo "gemini --yolo"
+      ;;
+    copilot)
+      # Orchestrator framing absent; weakest prompt-injection surface.
+      echo "copilot --allow-all-tools"
+      ;;
+    opencode)
+      # Orchestrator framing absent — see PILOT_BACKENDS_DEFAULT comment.
+      echo "opencode"
+      ;;
+    *)
+      echo "echo 'unknown pilot backend: ${backend}'; sleep 3"
+      ;;
+  esac
+}
+
+# Pick the active pilot backend. Order: arg > caller's PILOT_BACKEND env >
+# value persisted in `.yaamux/state` by --pilot-backend > first installed of
+# the default list. The per-repo state file is sourced here because pilot
+# flag handlers run in the case block, which is before the start-sequence
+# `source "$PANEL_CONF_LOCAL"` — so without this lookup, a value set by
+# `yaamux --pilot-backend foo` would never reach the next `--pilot-toggle`.
+_pilot_pick_backend() {
+  local hint="${1:-}"
+  if [[ -n "$hint" ]]; then echo "$hint"; return; fi
+  if [[ -n "${PILOT_BACKEND:-}" ]]; then echo "$PILOT_BACKEND"; return; fi
+  if [[ -f "$PANEL_CONF_LOCAL" ]]; then
+    # _save_panel_state writes `KEY=value` lines unquoted, so cut -d= is enough;
+    # no quote-stripping needed.
+    local persisted
+    persisted="$(grep -E '^PILOT_BACKEND=' "$PANEL_CONF_LOCAL" 2>/dev/null \
+      | tail -1 | cut -d= -f2-)"
+    [[ -n "$persisted" ]] && { echo "$persisted"; return; }
+  fi
+  local b
+  for b in $PILOT_BACKENDS_DEFAULT; do
+    pilot_probe "$b" && { echo "$b"; return; }
+  done
+  echo ""
 }
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -630,17 +746,21 @@ _render_panes() {
   printf '%s── panes (current session) %s%s\n' "$BOLD$FG_BLUE" "$DIM" "$RESET"
   [[ -z "$SESSION" ]] && { printf '  %s(no session)%s\n\n' "$DIM" "$RESET"; return; }
   tmux has-session -t "$SESSION" 2>/dev/null || { printf '  %s(session gone)%s\n\n' "$DIM" "$RESET"; return; }
-  local raw row idx role state notif title agent_n=0 focus_marker chip
+  local raw row idx role state notif title pmode agent_n=0 focus_marker chip
   raw="$(tmux list-panes -t "${SESSION}:agents" -F \
-    '#{pane_index}|#{@yaamux-role}|#{@yaamux-state}|#{@yaamux-notif-pending}|#{pane_title}' 2>/dev/null || true)"
+    '#{pane_index}|#{@yaamux-role}|#{@yaamux-state}|#{@yaamux-notif-pending}|#{@yaamux-panel-mode}|#{pane_title}' 2>/dev/null || true)"
   if [[ -z "$raw" ]]; then
     printf '  %s(no panes)%s\n\n' "$DIM" "$RESET"
     return
   fi
-  while IFS='|' read -r idx role state notif title; do
+  while IFS='|' read -r idx role state notif pmode title; do
     [[ -z "$idx" ]] && continue
     if [[ "$role" == "control-panel" ]]; then
-      printf '  %s    %s· %s🎛  control-panel%s (this pane)\n' "$FG_GREY" "$FG_CYAN" "$BOLD" "$RESET"
+      if [[ "$pmode" == "pilot" ]]; then
+        printf '  %s    %s· %s💬  control-panel%s (pilot — this pane)\n' "$FG_GREY" "$FG_MAGENTA" "$BOLD" "$RESET"
+      else
+        printf '  %s    %s· %s🎛  control-panel%s (dashboard — this pane)\n' "$FG_GREY" "$FG_CYAN" "$BOLD" "$RESET"
+      fi
       continue
     fi
     agent_n=$((agent_n+1))
@@ -689,8 +809,8 @@ for line in sys.stdin:
 
 _render_menu() {
   printf '%s── menu %s%s\n' "$BOLD$FG_BLUE" "$DIM" "$RESET"
-  printf '  %sr%s restart sel  %sR%s restart-dead  %sz%s zoom sel  %ss%s sync toggle\n' \
-    "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
+  printf '  %sr%s restart sel  %sR%s restart-dead  %sz%s zoom sel  %ss%s sync toggle  %sc%s chat (pilot)\n' \
+    "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
   printf '  %s1-9%s jump pane  %sEnter%s focus sel  %sTab%s next section  %sh/q%s hide panel\n' \
     "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
 }
@@ -707,6 +827,7 @@ _render_help() {
   printf '  %sR%s       restart all dead/idle (--restart-dead -y)\n' "$BOLD" "$RESET"
   printf '  %sz%s       toggle zoom on selected pane\n' "$BOLD" "$RESET"
   printf '  %ss%s       toggle synchronize-panes\n' "$BOLD" "$RESET"
+  printf '  %sc%s       flip this pane into pilot chat (--pilot-toggle)\n' "$BOLD" "$RESET"
   printf '  %s1-9%s     jump to pane N\n' "$BOLD" "$RESET"
   printf '  %sh%s,%sq%s   hide control panel (--panel-hide)\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
   printf '  %s?%s       toggle this help\n\n' "$BOLD" "$RESET"
@@ -771,6 +892,11 @@ _dispatch() {
        else
          tmux set-window-option -t "${SESSION}:agents" synchronize-panes on 2>/dev/null || true
        fi ;;
+    c) # Toggle this pane into pilot chat mode (respawns into an agent CLI
+       # with the yaamux-orchestrator system prompt). yaamux --pilot-toggle
+       # does the respawn-pane that kills this dashboard process — so we
+       # just kick it off and let respawn-pane handle the rest.
+       "$SELF_YAAMUX" --pilot-toggle >/dev/null 2>&1 || true ;;
     h|q) "$SELF_YAAMUX" --panel-hide >/dev/null 2>&1 || true; exit 0 ;;
     \?) SHOW_HELP=$((1 - SHOW_HELP)) ;;
     *) : ;;
@@ -803,6 +929,62 @@ done
 CPANEL_EOF
   chmod +x "$CPANEL_SCRIPT"
   log "Wrote ${CPANEL_SCRIPT}"
+}
+
+# Pilot orchestrator system prompt — written to disk and passed to the chosen
+# pilot CLI on launch. Embedded as a quoted heredoc so it stays in this single
+# file (single-file invariant). Idempotent; called by pilot_cmd when missing.
+_write_pilot_prompt() {
+  mkdir -p "$(dirname "$PILOT_PROMPT_FILE")"
+  cat > "$PILOT_PROMPT_FILE" << 'PILOT_EOF'
+# yaamux pilot — orchestrator role prompt
+
+You are the **yaamux pilot** for the tmux session named in `$YAAMUX_SESSION`.
+The human is chatting with you to drive the other agent panes — you are NOT
+editing code yourself. Your job is to query agents, forward prompts to them,
+and restart anything that's stuck.
+
+## Get your tool surface
+
+For the canonical, drift-guarded list of every yaamux command + your current
+situational context, run **once at session start**:
+
+```
+yaamux --agent-brief --format text
+```
+
+(Or `--format json` if you parse better that way; `markdown` is the default.)
+The brief lists every flag under `read` / `coordinate` / `background` / `ship`
+groups and is the single source of truth — prefer it over anything embedded
+in this prompt.
+
+## Pilot-specific nuances the brief doesn't cover
+
+1. **Forward user text with `yaamux --send-stdin N`** (preferred over
+   `--send N "<text>"`). The brief explains why — `--send-stdin` reads stdin
+   literally so the user's `"`, `$`, backticks, and newlines reach the
+   target agent verbatim. Example: `printf '%s' "$user_text" | yaamux --send-stdin 3`.
+
+2. **Destructive flags WILL popup-confirm for you.** When you run
+   `--broadcast`, `--restart`, `--restart-dead`, `--kill`, or `--clean`,
+   yaamux pops a `tmux display-popup` y/N for the human before executing.
+   The brief's "refused" group applies to regular agent panes, not to you —
+   you can call these freely; the popup is the human's final check. Don't
+   ask the human "should I?" before running them; just run them and let
+   the popup do its job.
+
+3. **Sibling agents are running with `YAAMUX_AGENT_MODE=safe`.** They cannot
+   `--kill` / `--clean` etc. You can. That's the asymmetry that makes you
+   the orchestrator.
+
+## Style
+
+- Be terse. The human sees you in a small control-panel pane.
+- "Agent N" is always the 1-based number from the brief.
+- To leave the pilot, the human presses **Ctrl+Space P** (or `c` inside the
+  dashboard). You don't need to exit yourself.
+PILOT_EOF
+  chmod 644 "$PILOT_PROMPT_FILE"
 }
 
 _gen_ssh_config() {
@@ -1146,10 +1328,16 @@ _cpanel_show() {
 }
 
 # Remove the control-panel pane and re-tile the agents. Persists intent even
-# when no session is running so the next start respects the choice.
+# when no session is running so the next start respects the choice. Clears
+# the pilot-active signals unconditionally — if the panel was in pilot mode
+# when --panel-hide / prefix-p removed it, sibling agents would otherwise
+# keep seeing a stale `@yaamux-pilot-active` after the orchestrator pane is
+# gone.
 _cpanel_hide() {
   _save_panel_state CONTROL_PANEL_VISIBLE false
   tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+  tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
   local idx
   idx="$(_panel_pane_idx)"
   [[ -z "$idx" ]] && return 0
@@ -1177,13 +1365,150 @@ _cpanel_toggle() {
 
 # Recreate the panel pane if state says it should be visible but no pane
 # carries the role (user manually killed it, or the session was started by
-# an older yaamux that didn't know about the panel).
+# an older yaamux that didn't know about the panel). Also auto-flips back to
+# dashboard mode when a pilot exits — pane is then dead under remain-on-exit,
+# so we respawn the dashboard in-place. Driven by the pane-exited tmux hook.
 _cpanel_self_heal() {
   [[ "${CONTROL_PANEL_VISIBLE:-true}" == "true" ]] || return 0
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
   local idx
   idx="$(_panel_pane_idx)"
-  [[ -n "$idx" ]] && return 0
-  _cpanel_show
+  if [[ -z "$idx" ]]; then
+    # Panel pane fully gone (user `tmux kill-pane`'d it, or older yaamux
+    # never created one). _cpanel_show always starts in dashboard mode, so
+    # clear the pilot-active signals first — without this, an agent who
+    # ran `tmux kill-pane` on a pilot panel would leave the orchestrator
+    # signal stuck on the session.
+    tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+    tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
+    _cpanel_show
+    return
+  fi
+  local pdead mode
+  pdead="$(tmux display-message -p -t "${SESSION}:agents.${idx}" '#{pane_dead}' 2>/dev/null || echo 0)"
+  [[ "$pdead" != "1" ]] && return 0
+  mode="$(tmux show-option -p -v -t "${SESSION}:agents.${idx}" @yaamux-panel-mode 2>/dev/null || echo dashboard)"
+  # Pilot died (or cpanel crashed) → flip to dashboard so the panel isn't a
+  # tombstone. Same path covers both: tmux respawn-pane -k revives the pane.
+  # When transitioning out of pilot mode, also clear the session-level
+  # @yaamux-pilot-active option and YAAMUX_PILOT_ACTIVE env so sibling
+  # agents don't keep seeing a "pilot active" signal after the orchestrator
+  # has exited (mirrors what _pilot_hide does for explicit toggles).
+  if [[ "$mode" == "pilot" ]]; then
+    tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-panel-mode dashboard 2>/dev/null || true
+    tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+    tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
+  fi
+  tmux select-pane -t "${SESSION}:agents.${idx}" -T "🎛  control-panel" 2>/dev/null || true
+  [[ -x "$CPANEL_SCRIPT" ]] || _write_cpanel
+  tmux respawn-pane -k -t "${SESSION}:agents.${idx}" \
+    "env YAAMUX_SELF='${SELF}' YAAMUX_SESSION='${SESSION}' YAAMUX_NOTIF_LOG='${NOTIF_LOG}' '${CPANEL_SCRIPT}'" \
+    2>/dev/null || true
+}
+
+# tmux display-popup y/N confirm. The popup runs in its own ephemeral tty so
+# the pilot CLI (which holds the panel pane in raw mode) can't intercept the
+# keypress. Returns 0 on y/Y, non-zero otherwise. Requires tmux 3.2+; on
+# older tmux falls back to a /dev/tty prompt (which the pilot may eat — pick
+# a modern tmux for pilot mode).
+_pilot_confirm() {
+  local what="$1"
+  # Escape single quotes so they survive into the popup's shell.
+  local safe="${what//\'/\'\\\'\'}"
+  if ! tmux display-popup -E -w 70 -h 9 \
+      "printf 'yaamux pilot — confirm:\n\n  %s\n\nproceed? [y/N] ' '${safe}'; \
+       read -r r </dev/tty; case \"\$r\" in y|Y) exit 0 ;; *) exit 1 ;; esac" \
+      2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+# Guard called by destructive flag handlers. No-op when YAAMUX_PILOT isn't 1
+# (so human-driven `yaamux --broadcast …` behaves exactly as before). When
+# the env says we ARE inside a pilot, popup-confirm unless --yes was passed.
+_pilot_gate() {
+  local what="$1"
+  [[ "${YAAMUX_PILOT:-0}" == "1" ]] || return 0
+  [[ "${YAAMUX_YES:-0}" == "1" ]] && return 0
+  _pilot_confirm "$what" || { log "pilot: cancelled."; return 1; }
+  return 0
+}
+
+# Show pilot mode: respawn the panel pane into the chosen agent CLI with
+# YAAMUX_PILOT=1 in its env and the yaamux-orchestrator system prompt loaded.
+# Idempotent — if pilot is already running, swaps to the requested backend.
+_pilot_show() {
+  local backend; backend="$(_pilot_pick_backend "${1:-}")"
+  [[ -z "$backend" ]] && die "No pilot backend installed (looked for: $PILOT_BACKENDS_DEFAULT)."
+  pilot_probe "$backend" || die "pilot backend '$backend' bin not found."
+  tmux has-session -t "$SESSION" 2>/dev/null || die "No yaamux session — start one with: yaamux"
+  local idx; idx="$(_panel_pane_idx)"
+  if [[ -z "$idx" ]]; then
+    _cpanel_show
+    idx="$(_panel_pane_idx)"
+    [[ -z "$idx" ]] && die "Could not create control-panel pane."
+  fi
+  _save_panel_state CONTROL_PANEL_VISIBLE true
+  _save_panel_state PILOT_BACKEND "$backend"
+  [[ -f "$PILOT_PROMPT_FILE" ]] || _write_pilot_prompt
+  tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-panel-mode pilot 2>/dev/null || true
+  # Session-level signal so sibling agents that shell out can detect "a
+  # pilot is driving us". Read via `tmux show-option -v @yaamux-pilot-active`
+  # or the situational fields of `yaamux --agent-brief`.
+  tmux set-option -t "$SESSION" @yaamux-pilot-active "$backend" 2>/dev/null || true
+  tmux set-environment -t "$SESSION" YAAMUX_PILOT_ACTIVE "$backend" 2>/dev/null || true
+  tmux select-pane -t "${SESSION}:agents.${idx}" -T "💬  pilot · ${backend}" 2>/dev/null || true
+  local launch; launch="$(pilot_cmd "$backend")"
+  # respawn-pane -k kills whatever's running (cpanel or a previous pilot) and
+  # starts the new command. YAAMUX_PILOT=1 makes destructive yaamux flags
+  # popup-confirm instead of running silently. YAAMUX_AGENT_MODE=pilot keeps
+  # the situational brief honest (sibling agents see "safe"; the pilot sees
+  # "pilot") without tripping the safe-mode guard which only refuses "safe".
+  #
+  # tmux runs this string via `sh -c <cmd>`. Don't wrap $launch in another
+  # `bash -lc "..."` — nested quoting would let sh evaluate `$(cat …)` from
+  # the claude launch string and word-split the prompt file's contents into
+  # multiple args. Letting sh -c run $launch directly keeps the `"$(cat …)"`
+  # quotes attached to the right argument.
+  if ! tmux respawn-pane -k -t "${SESSION}:agents.${idx}" \
+       "env YAAMUX_PILOT=1 YAAMUX_AGENT_MODE=pilot YAAMUX_SESSION='${SESSION}' YAAMUX_REPO_ROOT='${REPO_ROOT}' ${launch}" \
+       2>/dev/null; then
+    die "respawn-pane failed (tmux 3.2+ required for pilot mode)."
+  fi
+  log "Pilot mode: ${backend}"
+}
+
+# Hide pilot mode: respawn the panel back into the dashboard. Safe to call
+# when not in pilot mode (no-op then). Does NOT remove the panel pane — use
+# --panel-hide for that.
+_pilot_hide() {
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  local idx; idx="$(_panel_pane_idx)"
+  [[ -z "$idx" ]] && return 0
+  tmux set-option -p -t "${SESSION}:agents.${idx}" @yaamux-panel-mode dashboard 2>/dev/null || true
+  # Clear the "pilot is active" session signal; new shells will see it gone.
+  tmux set-option -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+  tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
+  tmux select-pane -t "${SESSION}:agents.${idx}" -T "🎛  control-panel" 2>/dev/null || true
+  [[ -x "$CPANEL_SCRIPT" ]] || _write_cpanel
+  tmux respawn-pane -k -t "${SESSION}:agents.${idx}" \
+    "env YAAMUX_SELF='${SELF}' YAAMUX_SESSION='${SESSION}' YAAMUX_NOTIF_LOG='${NOTIF_LOG}' '${CPANEL_SCRIPT}'" \
+    2>/dev/null || true
+}
+
+# Toggle pilot↔dashboard in the panel pane. Bound to `prefix P` and to the
+# `c` key inside the cpanel TUI.
+_pilot_toggle() {
+  tmux has-session -t "$SESSION" 2>/dev/null || die "No yaamux session."
+  local idx; idx="$(_panel_pane_idx)"
+  if [[ -z "$idx" ]]; then
+    _pilot_show ""
+    return
+  fi
+  local mode
+  mode="$(tmux show-option -p -v -t "${SESSION}:agents.${idx}" @yaamux-panel-mode 2>/dev/null || echo dashboard)"
+  if [[ "$mode" == "pilot" ]]; then _pilot_hide; else _pilot_show ""; fi
 }
 
 # Select the Nth agent pane (1-based). Bound to `prefix N` for 1..9.
@@ -1779,12 +2104,13 @@ you have a set of environment variables that describe your situation:
 | `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
 | `YAAMUX_AGENT_NUMBER` | 1-based, e.g. `3` |
 | `YAAMUX_AGENT_TOTAL`  | total agents in this session |
-| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` · `opencode` |
 | `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
 | `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
 | `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
 | `YAAMUX_VERSION`      | yaamux version string |
-| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent — destructive flags are refused |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent · `pilot` inside the orchestrator chat — destructive flags refused while `safe` |
+| `YAAMUX_PILOT_ACTIVE` | backend name (e.g. `claude`) if a pilot is driving this session — unset when the panel is in dashboard mode |
 
 Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
 next to the parent of `YAAMUX_REPO_ROOT`.
@@ -2277,6 +2603,7 @@ In-session keys (press Ctrl+Space, then the key):
   R            restart every dead / idle agent (confirms)
   L            clear screen + scrollback (fixes a garbled pane)
   p            toggle Control Panel pane (shows/hides; remembers)
+  P            flip the Control Panel pane between dashboard and pilot chat
   1-9          jump to agent pane N (skips control-panel)
   D            detach (agents keep running)
   C            connect-commands popup (mosh / ssh / --remote lines)
@@ -2297,6 +2624,7 @@ yaamux CLI (from any shell inside the repo):
   yaamux --list [--json]            list all yaamux sessions
   yaamux --status                   per-pane health snapshot
   yaamux --send N "text"            send text to agent N (1-based)
+  yaamux --send-stdin N             send STDIN to agent N (literal — safe for any bytes)
   yaamux --broadcast "text"         send to every agent (skips control-panel)
   yaamux --exec N "cmd"             run shell command in agent N
   yaamux --restart N                relaunch the agent in pane N
@@ -2312,6 +2640,11 @@ yaamux CLI (from any shell inside the repo):
   yaamux --toggle-panel             show/hide the Control Panel pane
   yaamux --panel-show               show the Control Panel pane
   yaamux --panel-hide               hide the Control Panel pane
+  yaamux --pilot-toggle             flip the panel between dashboard and pilot chat
+  yaamux --pilot-show [BACKEND]     enter pilot mode (claude/opencode/gemini/codex/copilot)
+  yaamux --pilot-hide               leave pilot mode (back to dashboard)
+  yaamux --pilot-backend BACKEND    change pilot backend (clears stale resume id)
+  yaamux --pilot-supported          list pilot backends installed locally
   yaamux --goto N                   focus agent pane N (1-based)
   yaamux --bg <name> "<cmd>"        spawn a background panel running <cmd>
   yaamux --bg-tail <name> [--from N] [--follow]
@@ -2349,6 +2682,7 @@ read	--refresh-states	recompute pane state badges
 read	--ci-status	CI status for an agent's PR: `--ci-status [N]` (no N = every pane that has a PR)
 read	--diff	diff agent N's branch vs `origin/main`: `--diff N` (delta-highlighted if installed)
 coordinate	--send	send a prompt to sibling agent N: `--send N "<prompt>"`
+coordinate	--send-stdin	send STDIN literally to agent N — safe for `"`, `$`, backticks, newlines (`printf '%s' "<text>" | yaamux --send-stdin N`)
 coordinate	--exec	synchronous run-and-wait: `--exec N "<cmd>" [timeout]`
 coordinate	--broadcast	send to every agent: `--broadcast "<prompt>"`
 coordinate	--restart	relaunch agent N: `--restart N`
@@ -2381,6 +2715,11 @@ internal	--panel-show	show the Control Panel pane
 internal	--panel-hide	hide the Control Panel pane
 internal	--toggle-panel	toggle the Control Panel pane
 internal	--cpanel-self-heal	repair a stuck Control Panel pane
+internal	--pilot-show	flip the Control Panel pane into pilot chat (operator-driven)
+internal	--pilot-hide	flip the Control Panel pane back to dashboard
+internal	--pilot-toggle	flip the Control Panel pane between dashboard and pilot chat
+internal	--pilot-backend	persist the default pilot backend
+internal	--pilot-supported	list pilot backends installed locally
 internal	--status-render	tmux status-right renderer
 internal	--goto	tmux-binding: jump to pane N
 internal	--sync	tmux-binding: toggle synchronize-panes
@@ -2408,9 +2747,30 @@ _skill_src() {
   return 1
 }
 
+# Resolve YAAMUX_PILOT_ACTIVE.
+#
+# Precedence is intentionally NOT "env wins": a sibling agent's shell inherits
+# YAAMUX_PILOT_ACTIVE at spawn time, and if the operator later toggles the
+# pilot off, that stale env hangs around inside the agent's already-running
+# process tree forever. So:
+#
+#   * Inside the pilot's own shell (YAAMUX_AGENT_MODE=pilot), the env IS the
+#     current truth — we set it ourselves at respawn time.
+#   * Everywhere else (sibling agent panes, the user's shell), the tmux
+#     session option is canonical — _pilot_hide updates it atomically.
+_brief_pilot_active() {
+  [[ -n "${YAAMUX_SESSION:-}" ]] || { echo "${YAAMUX_PILOT_ACTIVE:-}"; return; }
+  if [[ "${YAAMUX_AGENT_MODE:-}" == "pilot" && -n "${YAAMUX_PILOT_ACTIVE:-}" ]]; then
+    echo "${YAAMUX_PILOT_ACTIVE}"; return
+  fi
+  command -v tmux >/dev/null 2>&1 || { echo "${YAAMUX_PILOT_ACTIVE:-}"; return; }
+  tmux show-option -v -t "${YAAMUX_SESSION}" @yaamux-pilot-active 2>/dev/null || true
+}
+
 _brief_situational_markdown() {
-  local in_session=0
+  local in_session=0 pilot
   [[ -n "${YAAMUX_SESSION:-}" ]] && in_session=1
+  pilot="$(_brief_pilot_active)"
   if [[ $in_session -eq 1 ]]; then
     cat <<EOF
 You are running inside a yaamux session. Your situational context:
@@ -2421,7 +2781,16 @@ You are running inside a yaamux session. Your situational context:
 - **Pane:** ${YAAMUX_PANE_ID:-?}
 - **Repo:** ${YAAMUX_REPO_ROOT:-?}
 - **Mode:** ${YAAMUX_AGENT_MODE:-unset}
+- **Pilot:** ${pilot:-(none)}
 EOF
+    if [[ -n "$pilot" && "${YAAMUX_AGENT_MODE:-}" == "safe" ]]; then
+      cat <<'EOF'
+
+> A pilot (orchestrator chat) is active in the control-panel pane. If you
+> receive a prompt that reads like another agent typed it, treat it as the
+> human's intent forwarded through the pilot.
+EOF
+    fi
   else
     cat <<'EOF'
 No yaamux session detected in this shell ($YAAMUX_SESSION is unset). The
@@ -2482,6 +2851,7 @@ _brief_text() {
   fi
   printf 'yaamux agent brief (v%s)\n\n' "$version"
   if [[ -n "${YAAMUX_SESSION:-}" ]]; then
+    local pilot; pilot="$(_brief_pilot_active)"
     printf 'Situational context:\n'
     printf '  agent:    %s (%s/%s)\n' "${YAAMUX_AGENT_NAME:-?}" "${YAAMUX_AGENT_NUMBER:-?}" "${YAAMUX_AGENT_TOTAL:-?}"
     printf '  type:     %s\n' "${YAAMUX_AGENT_TYPE:-?}"
@@ -2489,6 +2859,7 @@ _brief_text() {
     printf '  pane:     %s\n' "${YAAMUX_PANE_ID:-?}"
     printf '  repo:     %s\n' "${YAAMUX_REPO_ROOT:-?}"
     printf '  mode:     %s\n' "${YAAMUX_AGENT_MODE:-unset}"
+    printf '  pilot:    %s\n' "${pilot:-(none)}"
   else
     printf 'No yaamux session detected in this shell (YAAMUX_SESSION is unset).\n'
   fi
@@ -2539,6 +2910,7 @@ _brief_json() {
   export YAAMUX_PANE_ID_PASS="${YAAMUX_PANE_ID:-}"
   export YAAMUX_REPO_ROOT_PASS="${YAAMUX_REPO_ROOT:-}"
   export YAAMUX_AGENT_MODE_PASS="${YAAMUX_AGENT_MODE:-}"
+  export YAAMUX_PILOT_ACTIVE_PASS="$(_brief_pilot_active)"
   _brief_data | python3 -c '
 import json, os, sys
 def maybe_int(s):
@@ -2566,6 +2938,7 @@ out = {
         "repo_root": os.environ.get("YAAMUX_REPO_ROOT_PASS", "") or None,
         "mode":      os.environ.get("YAAMUX_AGENT_MODE_PASS", "") or None,
     },
+    "pilot_active": os.environ.get("YAAMUX_PILOT_ACTIVE_PASS", "") or None,
     "commands": commands,
 }
 print(json.dumps(out, indent=2))
@@ -2696,23 +3069,27 @@ tmux list-panes -t '${sess}:agents' -F '#{pane_index}|#{pane_title}|#{pane_dead}
 # =============================================================================
 #  Argument parsing
 # =============================================================================
-# Pre-extract global modifiers (--yolo, --layout) that combine with positional args.
+# Pre-extract global modifiers (--yolo, --layout, --yes) that combine with
+# positional args / can appear before a subcommand flag. --yes bypasses the
+# pilot popup-confirm for destructive ops; honored only when YAAMUX_PILOT=1.
 REMAINING=()
 YAAMUX_YOLO="${YAAMUX_YOLO:-0}"
 YAAMUX_LAYOUT="${YAAMUX_LAYOUT:-}"
 YAAMUX_LINK_ENV="${YAAMUX_LINK_ENV:-0}"
+YAAMUX_YES="${YAAMUX_YES:-0}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yolo)       YAAMUX_YOLO=1 ;;
     --layout)     YAAMUX_LAYOUT="${2:?--layout needs value: main|tiled|even}"; shift ;;
     --layout=*)   YAAMUX_LAYOUT="${1#--layout=}" ;;
     --link-env)   YAAMUX_LINK_ENV=1 ;;
+    --yes)        YAAMUX_YES=1 ;;
     *)            REMAINING+=("$1") ;;
   esac
   shift
 done
 set -- "${REMAINING[@]+"${REMAINING[@]}"}"
-export YAAMUX_YOLO YAAMUX_LAYOUT YAAMUX_LINK_ENV
+export YAAMUX_YOLO YAAMUX_LAYOUT YAAMUX_LINK_ENV YAAMUX_YES
 
 # Positional form:  yaamux [N] [type ...]   |   Flag form:  yaamux --xxx
 AGENT_TYPES=(); N=""; PATTERN=()
@@ -2764,6 +3141,29 @@ case "${1:-}" in
   --panel-hide)     _cpanel_hide;           exit 0 ;;
   --toggle-panel)   _cpanel_toggle;         exit 0 ;;
   --cpanel-self-heal) _cpanel_self_heal;    exit 0 ;;
+
+  # Pilot mode — orchestrator agent CLI in the control-panel pane. Drives the
+  # other agent panes via the existing flag surface (--list / --send / etc.).
+  # Auth, billing, conversation memory all live in the chosen agent CLI.
+  --pilot-show)      _pilot_show "${2:-}";    exit 0 ;;
+  --pilot-hide)      _pilot_hide;             exit 0 ;;
+  --pilot-toggle)    _pilot_toggle;           exit 0 ;;
+  --pilot-backend)
+    NEW="${2:?Usage: yaamux --pilot-backend BACKEND}"
+    # Validate against the known set BEFORE persisting. `.yaamux/state` is
+    # later sourced as shell, so an unvalidated value containing newlines,
+    # `;`, `$()`, etc. would execute on the next yaamux run. Accept the
+    # full KNOWN set (not just DEFAULT) so users can pin a non-default
+    # backend; pilot_cmd handles the per-backend launch — backends without
+    # wired orchestrator framing still launch, just without the prompt.
+    case " $PILOT_BACKENDS_KNOWN " in
+      *" $NEW "*) ;;
+      *) die "Unknown pilot backend '${NEW}'. Valid: ${PILOT_BACKENDS_KNOWN}." ;;
+    esac
+    _save_panel_state PILOT_BACKEND "$NEW"
+    log "Pilot backend set to '${NEW}'. Toggle with: yaamux --pilot-toggle"
+    exit 0 ;;
+  --pilot-supported) pilot_supported;         exit 0 ;;
 
   # Internal: render per-pane status badges (consumed by tmux status-right).
   --status-render)
@@ -3080,12 +3480,15 @@ case "${1:-}" in
     exec tmux attach -t "$_mg_umbrella" ;;
 
   --kill)
+    _pilot_gate "kill session ${SESSION}" || exit 0
     tmux kill-session -t "$SESSION" 2>/dev/null && log "Killed ${SESSION}." || warn "Not running."
     exit 0 ;;
 
   --clean)
     force=false
     [[ "${2:-}" == "--force" ]] && force=true
+    if $force; then _pilot_gate "clean worktrees (force — discards dirty work)" || exit 0
+    else            _pilot_gate "clean worktrees (clean ones only)"             || exit 0; fi
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     skipped=0
     if [[ -d "$WORKTREES_BASE" ]]; then
@@ -3173,8 +3576,26 @@ case "${1:-}" in
     AGENT_NAME="$(tmux show-option -p -v -t "${SESSION}:agents.${IDX}" @yaamux-agent 2>/dev/null || echo "agent-${N_ARG}")"
     log "Sent to ${AGENT_NAME}."; exit 0 ;;
 
+  # Shell-injection-safe variant: payload on stdin, sent literally via
+  # `tmux send-keys -l`. Use this from the pilot (and any script) when the
+  # text might contain `"`, `$`, backticks, or newlines.
+  --send-stdin)
+    N_ARG="${2:?Usage: printf '%s' \"<text>\" | yaamux --send-stdin N}"
+    IDX="$(_agent_pane_idx "$N_ARG")" || die "agent $N_ARG not found."
+    # Bash's `$(cat)` strips ALL trailing newlines, so a payload ending in
+    # `\n` (or several) would be silently truncated. The sentinel trick
+    # appends a literal `x`, then strips it off after the command
+    # substitution returns — preserving the exact stdin bytes.
+    PAYLOAD="$(cat; printf x)"
+    PAYLOAD="${PAYLOAD%x}"
+    tmux send-keys -l -t "${SESSION}:agents.${IDX}" -- "$PAYLOAD"
+    tmux send-keys -t "${SESSION}:agents.${IDX}" Enter
+    AGENT_NAME="$(tmux show-option -p -v -t "${SESSION}:agents.${IDX}" @yaamux-agent 2>/dev/null || echo "agent-${N_ARG}")"
+    log "Sent ${#PAYLOAD} bytes to ${AGENT_NAME}."; exit 0 ;;
+
   --broadcast)
     PROMPT="${2:?Usage: yaamux --broadcast \"prompt\"}"
+    _pilot_gate "broadcast: ${PROMPT:0:60}" || exit 0
     # Iterate only agent panes (skip control-panel). N comes from the role
     # filter, not window_panes — broadcasting to the panel would clobber it.
     raw="$(tmux list-panes -t "${SESSION}:agents" \
@@ -3190,6 +3611,7 @@ case "${1:-}" in
   --restart)
     N_ARG="${2:?Usage: yaamux --restart N}"
     IDX="$(_agent_pane_idx "$N_ARG")" || die "agent $N_ARG not found."
+    _pilot_gate "restart agent ${N_ARG}" || exit 0
     _restart_pane "$IDX"
     exit 0 ;;
 
@@ -3206,7 +3628,11 @@ case "${1:-}" in
   # Heal-all: restart every pane whose state is not 'running'. -y skips
   # the confirm prompt (used by the `prefix R` keybinding).
   --restart-dead)
-    YES=false; [[ "${2:-}" == "-y" ]] && YES=true
+    # Positional `-y` is the legacy form (used by the `prefix R` binding's
+    # confirm-before chain). `--yes` is the global form pre-extracted into
+    # YAAMUX_YES — honor both so the pilot's --yes bypass path also works.
+    YES=false
+    [[ "${2:-}" == "-y" || "${YAAMUX_YES:-0}" == "1" ]] && YES=true
     tmux has-session -t "$SESSION" 2>/dev/null || { log "No session for ${PROJECT_NAME}."; exit 0; }
     _refresh_pane_states
     SHELLS="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
@@ -3222,7 +3648,14 @@ case "${1:-}" in
       log "All ${CNT} panes running — nothing to restart."
       exit 0
     fi
-    if ! $YES; then
+    if [[ "${YAAMUX_PILOT:-0}" == "1" ]]; then
+      # Pilot's tty would eat an inline `read` — popup-confirm instead. -y
+      # / --yes still bypasses; positional -y above set $YES.
+      if ! $YES; then
+        _pilot_confirm "restart ${#TARGETS[@]} dead/idle pane(s)?" \
+          || { log "Aborted."; exit 0; }
+      fi
+    elif ! $YES; then
       echo -n "Restart ${#TARGETS[@]} dead/idle pane(s)? [y/N] "
       read -r ans
       [[ "$ans" =~ ^[Yy] ]] || { log "Aborted."; exit 0; }
@@ -3344,7 +3777,7 @@ HAS_CLAUDE=false
 for i in "${!AGENT_TYPES[@]}"; do
   t="${AGENT_TYPES[$i]}"; bin="$(agent_bin "$t")"
   [[ "$t" == "claude" ]] && HAS_CLAUDE=true
-  [[ -z "$bin" ]] && die "Invalid agent type '${t}'. Use: claude|gemini|copilot|codex"
+  [[ -z "$bin" ]] && die "Invalid agent type '${t}'. Use: claude|gemini|copilot|codex|opencode"
   if command -v "$bin" &>/dev/null; then
     echo -e "  $(agent_icon "$t") ${AGENTS[$i]} → ${BOLD}${t}${NC}"
   else
@@ -3357,10 +3790,11 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
   warn "Install missing CLIs:"
   for m in $(printf '%s\n' "${MISSING[@]}" | sort -u); do
     case "$m" in
-      claude)  echo "    npm install -g @anthropic-ai/claude-code" ;;
-      gemini)  echo "    npm install -g @google/gemini-cli" ;;
-      copilot) echo "    npm install -g @github/copilot" ;;
-      codex)   echo "    npm install -g @openai/codex" ;;
+      claude)   echo "    npm install -g @anthropic-ai/claude-code" ;;
+      gemini)   echo "    npm install -g @google/gemini-cli" ;;
+      copilot)  echo "    npm install -g @github/copilot" ;;
+      codex)    echo "    npm install -g @openai/codex" ;;
+      opencode) echo "    npm install -g opencode-ai   # or: brew install sst/tap/opencode" ;;
     esac
   done
   die "Install the above, or pick different agent types."
@@ -3511,6 +3945,10 @@ if command -v lazygit &>/dev/null; then
 fi
 # Control Panel: prefix p toggles show/hide; remembers via .yaamux/state.
 tmux bind-key      -T prefix p run-shell -b "${SELF} --toggle-panel"
+# Pilot mode: prefix P (capital) flips the control panel pane between the
+# dashboard and a chat-style orchestrator powered by an installed agent CLI
+# (claude / opencode / gemini / codex / copilot — first installed wins).
+tmux bind-key      -T prefix P run-shell -b "${SELF} --pilot-toggle"
 # Ergonomic zoom toggle — Ctrl+Space → Space is a one-handed double-tap.
 # tmux's idiomatic `prefix Z` keeps working alongside this.
 tmux bind-key      -T prefix Space resize-pane -Z
@@ -3759,7 +4197,7 @@ fi
 $HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
 echo ""
 echo -e " ${CYAN}Manage:${NC}  yaamux --send N \"x\" · --broadcast \"x\" · --restart N · --vscode N · --logs · --connect [--qr]"
-echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach · ${BOLD}C connect${NC} · ${BOLD}Q QR${NC}"
+echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach · ${BOLD}C connect${NC} · ${BOLD}Q QR${NC} · ${BOLD}P pilot${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 

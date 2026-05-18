@@ -18,7 +18,7 @@ One bash file · one tmux session per repo · zero ceremony.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Single file](https://img.shields.io/badge/single--file-bash-89e051.svg)](./yaamux)
 
-🤖 Claude Code · ✦ Gemini CLI · 🐙 GitHub Copilot CLI · ⬡ Codex CLI
+🤖 Claude Code · ✦ Gemini CLI · 🐙 GitHub Copilot CLI · ⬡ Codex CLI · ◉ opencode
 
 </div>
 
@@ -190,7 +190,7 @@ Wires up **ntfy** push delivery and a **Blink Shell deep link**. When an agent n
 
 ## 🎛️ Pick your agents
 
-Positional form: `ymx [N] [type ...]`. Types: `claude` · `gemini` · `copilot` · `codex`. Max 20.
+Positional form: `ymx [N] [type ...]`. Types: `claude` · `gemini` · `copilot` · `codex` · `opencode`. Max 20.
 
 ```bash
 ymx                              # 4 Claude (default)
@@ -232,6 +232,22 @@ ymx --broadcast "reread the brief and tighten the intro"   # same prompt → eve
 ymx --broadcast "rebase onto main and run tests"           # works for any task
 ymx --sync                                                  # toggle keystroke sync
 ```
+
+### Pilot chat — talk to one agent, drive them all
+
+The Control Panel pane has a second mode: a **pilot chat** powered by an installed agent CLI. It reads your natural language and drives the other agent panes via the existing `ymx --send` / `--send-stdin` / `--broadcast` / `--restart` flags. **No API key needed** — auth, billing, and conversation memory all live in the chosen CLI.
+
+Auto-selection picks `claude` — it's the only backend whose orchestrator system prompt is wired today. `codex` / `gemini` / `copilot` / `opencode` are selectable explicitly but launch as plain CLIs (no orchestrator framing) until their prompt mechanism is wired.
+
+```bash
+ymx --pilot-toggle                # flip Control Panel pane: dashboard ↔ pilot
+ymx --pilot-show                  # auto-enter (claude when installed)
+ymx --pilot-show codex            # explicit — no orchestrator framing yet
+ymx --pilot-backend opencode      # pin a default (persists per repo)
+ymx --pilot-supported             # → installed backends from the known set
+```
+
+Or press **`Ctrl+Space + P`** from inside the session. Destructive calls the pilot makes (`--broadcast`, `--restart`, `--kill`, `--clean`) pop a `tmux display-popup` y/N for the human first — pass `--yes` to skip when the pilot scripts a known-safe batch.
 
 ### Hand a pane to your editor
 
@@ -281,6 +297,8 @@ ymx --status                     # health of this repo's session
 | `Ctrl+Space` + `R`      | Restart all dead/idle agents (confirms)                 |
 | `Ctrl+Space` + `L`      | Clear screen + scrollback                               |
 | `Ctrl+Space` + `d`      | Detach (agents keep running) — tmux default             |
+| `Ctrl+Space` + `p`      | Toggle Control Panel pane (show/hide)                   |
+| `Ctrl+Space` + `P`      | **Pilot chat** — flip Control Panel pane between dashboard and orchestrator chat |
 | `Ctrl+Space` + `C`      | **Connect-commands popup** (mosh · ssh · `--remote`)    |
 | `Ctrl+Space` + `Q`      | **QR popup** — scan with iOS Camera, opens `mosh://` in Blink / Prompt / Termius |
 | `Ctrl+Space` + `G`      | **`git` window** — lazygit · worktrees · branches · PRs |
@@ -307,6 +325,10 @@ Run `ymx --keys` from any shell for the same cheat sheet — no tmux needed.
 | `ymx --layout main\|tiled\|even`                    | Override the auto-picked pane layout                                 |
 | `ymx --zoom N` / `--vscode N`                       | Focus pane N / hand it to VS Code                                    |
 | `ymx --send N "x"` / `--broadcast "x"`              | Inject a prompt into one pane / every pane                           |
+| `ymx --send-stdin N`                                | Like `--send N` but reads STDIN literally — safe for `"`, `$`, backticks, newlines |
+| `ymx --pilot-toggle`                                | Flip Control Panel pane between dashboard and pilot orchestrator chat |
+| `ymx --pilot-show [BACKEND]` / `--pilot-hide`       | Explicit pilot enter/leave (backend: claude / opencode / gemini / codex / copilot) |
+| `ymx --pilot-backend BACKEND` / `--pilot-supported` | Set default backend / list installed backends                        |
 | `ymx --exec N "x" [timeout]`                        | Headless: send, wait for idle, return output (default 5 min)         |
 | `ymx --pr N [title] [--merge]`                      | Push pane N's branch + open PR via the configured forge (`gh` / `glab` / `tea` — see `YAAMUX_FORGE`) |
 | `ymx --watch-pr N` / `--auto-merge N`               | Watch CI / enable auto-merge on pane N's PR                          |
@@ -382,7 +404,7 @@ A `yaamux-guard.sh` hook blocks `rm -rf /`, `mkfs`, `dd of=/dev/…` etc. **for 
 
 ## ✅ Requirements
 
-`tmux` 3.2+ · `git` · `python3` · `curl` · at least one agent CLI (`claude`, `gemini`, `codex`, `copilot`).
+`tmux` 3.2+ · `git` · `python3` · `curl` · at least one agent CLI (`claude`, `gemini`, `codex`, `copilot`, `opencode`).
 
 Bundled by the Homebrew formula: `tmux`, `git`, `python@3`, `mosh`, `qrencode`, `lazygit`, `gh`, `git-delta`, `bat`. If you install via `--install` (git clone) instead, grab those yourself — yaamux degrades gracefully (the `git` window is skipped without `lazygit`; PR flags fail with a clear error without the relevant forge CLI — `gh` for GitHub, `glab` for GitLab, `tea` for Gitea — auto-detected from `git remote get-url origin`, overridable with `YAAMUX_FORGE`; diffs and file viewing fall back to plain output without `delta` / `bat`).
 

@@ -29,7 +29,7 @@ When you are in a session, the following env vars describe your position:
 | `YAAMUX_AGENT_NAME`   | your worktree name (e.g. `agent-3`) |
 | `YAAMUX_AGENT_NUMBER` | your 1-based ordinal (e.g. `3`) |
 | `YAAMUX_AGENT_TOTAL`  | total agents in this session |
-| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` · `opencode` |
 | `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
 | `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
 | `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
@@ -86,6 +86,13 @@ doing it yourself in your worktree:
 yaamux --send 2 "Run the integration tests against the auth module"
 ```
 
+When the prompt is user-supplied or contains `"`, `$`, backticks, or
+newlines, use the literal-stdin variant — it dodges shell-quoting bugs:
+
+```bash
+printf '%s' "$user_text" | yaamux --send-stdin 2
+```
+
 For a synchronous request — send and wait for the agent to go idle:
 
 ```bash
@@ -94,6 +101,27 @@ yaamux --exec 3 "Summarize the diff in your branch" 120
 
 `--exec` polls the target pane for that agent's idle pattern, with a
 timeout in seconds (default 60).
+
+### If a pilot is active
+
+The Control Panel pane can be flipped from its dashboard view into a
+**pilot chat** — an orchestrator agent CLI (claude / opencode / gemini /
+codex / copilot) talking to the human and driving the agent panes via
+the same `--send` / `--send-stdin` / `--broadcast` / `--restart` flags.
+
+Detect a running pilot from your own pane:
+
+```bash
+yaamux --agent-brief --format json | python3 -c \
+  'import json,sys; print(json.load(sys.stdin).get("pilot_active") or "(none)")'
+# or, directly:
+tmux show-option -v -t "$YAAMUX_SESSION" @yaamux-pilot-active 2>/dev/null
+```
+
+If a pilot IS active and you receive a `--send` / `--send-stdin` prompt
+that reads like another agent typed it, treat it as the human's intent
+forwarded through the pilot — respond as if a human asked you directly.
+You don't need to talk to the pilot yourself; it talks to you.
 
 ### Open a PR for your work
 

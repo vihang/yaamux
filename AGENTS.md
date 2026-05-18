@@ -47,13 +47,14 @@ After **every** edit to `yaamux`:
 # 1. Syntax-check the main script
 bash -n yaamux
 
-# 2. Syntax-check the 4 embedded heredoc scripts (they ship inside yaamux)
-rm -f /tmp/{GUARD,NOTIFY,MOBILE,CPANEL}_EOF
+# 2. Syntax-check the 5 embedded heredoc scripts (they ship inside yaamux).
+#    PILOT_EOF is a markdown prompt — extract but skip bash -n on it.
+rm -f /tmp/{GUARD,NOTIFY,MOBILE,CPANEL,PILOT}_EOF
 python3 - <<'PY'
 import re, sys
 src = open('yaamux').read()
 ok = True
-for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF', 'CPANEL_EOF'):
+for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF', 'CPANEL_EOF', 'PILOT_EOF'):
     m = re.search(r"<<\s*'" + tag + r"'\s*\n(.*?)\n" + tag + r"\s*\n", src, re.S)
     if m:
         open('/tmp/' + tag, 'w').write(m.group(1))
@@ -62,6 +63,7 @@ for tag in ('GUARD_EOF', 'NOTIFY_EOF', 'MOBILE_EOF', 'CPANEL_EOF'):
 if not ok: sys.exit(1)
 PY
 for t in GUARD_EOF NOTIFY_EOF MOBILE_EOF CPANEL_EOF; do [[ -f /tmp/$t ]] && bash -n /tmp/$t && echo "$t ok"; done
+[[ -f /tmp/PILOT_EOF ]] && echo "PILOT_EOF ok (markdown — not bash-checked)"
 
 # 3. Lint (install: brew install shellcheck)
 shellcheck yaamux
@@ -84,17 +86,19 @@ These are deliberate design decisions. Do not "improve" them without an
 explicit instruction to do so.
 
 1. **Single file.** The helper scripts (`yaamux-guard.sh`, `yaamux-notify.sh`,
-   `yaamux-mobile-attach.sh`, `yaamux-cpanel.sh`) are embedded as heredocs and
-   written to disk at runtime. Do not split them into separate files —
-   install-once portability depends on `yaamux` being self-contained.
+   `yaamux-mobile-attach.sh`, `yaamux-cpanel.sh`, `pilot-prompt.md`) are
+   embedded as heredocs and written to disk at runtime. Do not split them
+   into separate files — install-once portability depends on `yaamux` being
+   self-contained.
 
 2. **Stateless / no project pinning.** yaamux must derive the project from
    `git rev-parse --show-toplevel` on every run. Never write a config file
    that hard-codes a repo path. Persistent config is opt-in and lives at
-   well-known paths: global at `~/.config/yaamux/{notify,control-panel}.conf`
-   and `~/.config/yaamux/hosts.conf`; per-repo at `<repo>/.yaamux/config`,
-   `<repo>/.yaamux/state`, and `<repo>/.yaamux/panels/<name>.{log,meta}`
-   (all gitignored).
+   well-known paths: global at `~/.config/yaamux/{notify,control-panel}.conf`,
+   `~/.config/yaamux/hosts.conf`, and `~/.config/yaamux/pilot-prompt.md`
+   (the orchestrator system prompt, written once by `_write_pilot_prompt`);
+   per-repo at `<repo>/.yaamux/config`, `<repo>/.yaamux/state`,
+   and `<repo>/.yaamux/panels/<name>.{log,meta}` (all gitignored).
 
 3. **Session per repo.** `SESSION="yaamux-${PROJECT_NAME}"`. Never use a fixed
    session name — it would collide across repos.
@@ -112,7 +116,10 @@ explicit instruction to do so.
    with `--`. Do not add bare-word subcommands.
 
 7. **Agent-agnostic.** Adding/removing an agent type means editing exactly
-   three functions: `agent_bin`, `agent_icon`, `agent_cmd`. Nothing else
+   four functions: `agent_bin`, `agent_icon`, `agent_cmd`, `agent_idle_pattern`,
+   plus the per-agent `<TYPE>_FLAGS_{SAFE,YOLO}` defaults read by
+   `agent_flags`. Pilot backends are the same set, with optional per-backend
+   tweaks in `pilot_cmd` (system prompt flag, resume flag). Nothing else
    should branch on agent type.
 
    The same rule applies to the **forge** (git-host CLI). Every call into a
@@ -144,6 +151,15 @@ explicit instruction to do so.
    `--restart N`, `--zoom N`, `--exec N` site. The agent name (`agent-N`)
    is stored per-pane on `@yaamux-agent`; read that rather than computing
    it from a tmux index, which is unstable across layout modes.
+   **Sub-state for the panel pane**: a second user-option `@yaamux-panel-mode`
+   takes values `dashboard` (default) or `pilot`. The role stays
+   `control-panel` in both modes so every existing filter still excludes
+   the pane; the sub-state only changes what's running inside it. Toggling
+   is done by `tmux respawn-pane -k` against the panel pane, which kills
+   the current process (cpanel script or pilot agent CLI) and starts the
+   new one in the same pane. The `pane-exited` hook routes through
+   `_cpanel_self_heal`, which respawns the dashboard if a pilot CLI exits
+   on its own (Ctrl-D, `/exit`, etc.).
 
 10. **Background panels = non-agent, non-blocking shell processes.** They
     live in the `bg` window (lazy-created on first `--bg`), one pane per
@@ -208,14 +224,16 @@ The `yaamux` file is ordered top-to-bottom as:
 | Project context | `REPO_ROOT` (honors `YAAMUX_REPO_ROOT` env override — see invariant #11), `SESSION`, `WORKTREES_BASE`, paths |
 | Agent brief | `_brief_data` / `_brief_markdown` / `_brief_text` / `_brief_json` / `_emit_brief` / `_skill_src` — back `--agent-brief` and the skill install (see invariants #12, #13) |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
-| `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only agent-type switch |
+| `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` / `agent_idle_pattern` / `agent_flags` — the only type switch (supported types: claude, gemini, copilot, codex, opencode) |
+| Pilot helpers | `pilot_supported` / `pilot_probe` / `pilot_cmd` / `_pilot_pick_backend` — orchestrator-backend selection + launch composition (same backend set as the `agent_*` helpers) |
 | `forge_*` helpers | `forge_url_hostname` / `forge_provider` / `forge_bin` / `forge_label` / `forge_create_pr` / `forge_view_pr` / `forge_pr_checks_watch` / `forge_merge_pr` / `forge_pr_ci_status` — the only git-host switch (PR/CI ops) |
-| Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
+| Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` / `_write_pilot_prompt` |
 | Lifecycle | `_install_yaamux` / `_update_yaamux` / `_uninstall_yaamux` / `_add_docs` / `_gen_ssh_config` / `_install_launchagent` / `_prepare_host_mosh` (host-level mosh-server PATH fix for `mosh://` URLs) |
 | Remote ops | `_remote_resolve_host` / `_remote_list_raw` / `_remote_print_list` / `_remote_pick_session` / `_remote_attach` / `_remote_dispatch` — back the `--remote` flag |
 | Pane health | `_pane_state` / `_refresh_pane_states` / `_restart_pane` / `_triage_prompt` / `_remote_triage_prompt` — back `--restart-current` / `--restart-dead` / `--refresh-states` and the attach-time triage. All filter on `@yaamux-role` |
 | Pane addressing | `_agent_pane_idx N` (1-based agent → tmux `pane_index`), `_panel_pane_idx`, `_agent_count` — the canonical way to resolve "agent N" in a panel-aware layout |
 | Control Panel | `_cpanel_show` / `_cpanel_hide` / `_cpanel_toggle` / `_cpanel_self_heal` / `_save_panel_state` / `_status_render` / `_goto_pane` — back `--toggle-panel` / `--panel-show` / `--panel-hide` / `--cpanel` / `--status-render` / `--goto N` |
+| Pilot mode    | `_pilot_show` / `_pilot_hide` / `_pilot_toggle` / `_pilot_confirm` / `_pilot_gate` / `_pilot_pick_backend` / `_brief_pilot_active` — back `--pilot-show` / `--pilot-hide` / `--pilot-toggle` / `--pilot-backend` / `--pilot-supported` and the popup-confirm gate on destructive flags when `YAAMUX_PILOT=1` |
 | Background panels | `_bg_spawn` / `_bg_tail` / `_bg_list` / `_bg_kill` / `_bg_status` / `_bg_ensure_window` / `_bg_save_meta` / `_bg_read_meta` / `_bg_gen_token` / `_bg_validate_name` — back `--bg` / `--bg-tail` / `--bg-list` / `--bg-kill` |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
 | Safe-mode guard | `YAAMUX_AGENT_MODE=safe` check above the flag `case` — refuses destructive flags (see invariant #11) |
@@ -261,6 +279,11 @@ The `yaamux` file is ordered top-to-bottom as:
 | Per-pane | `--send 2 "x"` / `--restart 2` / `--zoom 2` | Targets correct pane |
 | Multi-repo | `yaamux` in repo A and repo B | Two sessions, no collision |
 | Install | `--install` then `yaamux` from elsewhere | Resolves new repo correctly |
+| Send-stdin | `printf 'hi $there `now`' \| yaamux --send-stdin 1` | Bytes preserved verbatim — no shell-quote mangling |
+| opencode | `yaamux 1 opencode` (with opencode installed) | Pane launches `opencode`; agent type shown as `◉ agent-1 → opencode` |
+| Pilot enter | `yaamux --pilot-toggle` | Panel pane respawns into pilot CLI; `@yaamux-panel-mode=pilot` |
+| Pilot leave | `yaamux --pilot-toggle` (again) | Panel pane respawns into dashboard; `@yaamux-panel-mode=dashboard` |
+| Pilot confirm | inside pilot, `yaamux --broadcast "x"` | tmux popup asks y/N; N aborts, Y runs |
 
 ---
 
@@ -274,12 +297,20 @@ bats suite · GitHub Actions CI · Homebrew tap · `--remote <host>` /
 `--remote-hosts` (cross-machine session access via SSH/mosh, with picker,
 saved aliases at `~/.config/yaamux/hosts.conf`, and per-pane zoom).
 
+Shipped post-v0.3: **pilot mode** — orchestrator chat in the Control Panel
+pane, powered by an installed agent CLI (claude / opencode / gemini /
+codex / copilot — first installed wins), driving the agent panes via the
+existing `--send` / `--send-stdin` / `--broadcast` / `--restart` flag
+surface; popup-confirm on destructive ops when `YAAMUX_PILOT=1` so the
+pilot can't silently fan out a `--broadcast` or `--restart-dead`. Also
+**opencode as a 5th first-class agent type**.
+
 Deferred to v0.2+ (see `/Users/vihang/.claude/plans/cached-sleeping-jellyfish.md`
 Roadmap section R1–R12): controller mode · council/pipeline/vote/pair
-patterns · TUI keybinding layer · opencode 5th agent type · shared
-context layer with per-agent adapters · GitHub-issue-queue dev mode ·
-watchdog/auto-recovery · cost tracking · `--watch-pr` CI loop · `--serve`
-web UI · `--container` sandbox · pre-warm pane.
+patterns · TUI keybinding layer · shared context layer with per-agent
+adapters · GitHub-issue-queue dev mode · watchdog/auto-recovery · cost
+tracking · `--watch-pr` CI loop · `--serve` web UI · `--container` sandbox
+· pre-warm pane.
 
 Open backlog (small / platform / hygiene items not yet in v0.2 roadmap):
 

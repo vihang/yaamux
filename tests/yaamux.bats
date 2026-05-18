@@ -1280,3 +1280,139 @@ print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
   grep -q "^name: yaamux" "$src"
   grep -q "^description:" "$src"
 }
+
+# ── opencode 5th agent type ───────────────────────────────────────────────────
+
+@test "--keys advertises opencode alongside the original four agents" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude"* ]]
+  # Must mention opencode explicitly — the earlier `|| --pilot-show` fallback
+  # would pass even if a regression dropped opencode entirely.
+  [[ "$output" == *"opencode"* ]]
+}
+
+@test "agent_bin maps opencode to the opencode binary" {
+  # Source the helper function and call it directly — avoids needing to
+  # actually launch tmux + the opencode CLI (which may not be installed).
+  body="$(awk '/^agent_bin\(\)/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$(agent_bin opencode)" = "opencode" ]
+}
+
+@test "agent_icon returns a glyph for opencode" {
+  body="$(awk '/^agent_icon\(\)/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  out="$(agent_icon opencode)"
+  [ -n "$out" ]
+  [ "$out" != "❓" ]
+}
+
+@test "yaamux ships an install hint for missing opencode in the preflight" {
+  # The agent-line-up preflight prints per-type install hints when a CLI
+  # is missing. Verifying that hint string exists in the script source
+  # is a stable proxy — actually triggering it would require a PATH that
+  # has tmux+git+python3 but not opencode, which differs per environment.
+  grep -q 'opencode-ai\|sst/tap/opencode' "$YAAMUX_BIN"
+}
+
+# ── --send-stdin (shell-injection-safe variant for pilot mode) ────────────────
+
+@test "--send-stdin without N exits non-zero (usage)" {
+  run bash -c "printf 'hi' | '$YAAMUX_BIN' --send-stdin"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage"* ]]
+}
+
+@test "--send-stdin without a running session reports agent not found" {
+  run bash -c "printf 'hi' | '$YAAMUX_BIN' --send-stdin 1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"agent 1 not found"* ]]
+}
+
+# ── Pilot mode (--pilot-*) ────────────────────────────────────────────────────
+
+@test "--pilot-supported lists pilot backends installed locally (or empty)" {
+  # Output is the (possibly empty) space-separated list of installed backends.
+  # We only assert the call succeeds and produces zero-or-more tokens from
+  # the known set.
+  run_yaamux --pilot-supported
+  [ "$status" -eq 0 ]
+  # Every token must be one of the five known backends, if any.
+  for tok in $output; do
+    case "$tok" in
+      claude|gemini|copilot|codex|opencode) ;;
+      *) printf "unexpected backend token: %s\n" "$tok"; return 1 ;;
+    esac
+  done
+}
+
+@test "--pilot-show without a running session errors cleanly" {
+  run_yaamux --pilot-show
+  [ "$status" -ne 0 ]
+  # Either "No yaamux session" (when a backend IS installed) or "No pilot
+  # backend installed" (CI runners with no agent CLIs) — both acceptable.
+  [[ "$output" == *"No yaamux session"* || "$output" == *"No pilot backend"* ]]
+}
+
+@test "--pilot-toggle without a running session errors cleanly" {
+  run_yaamux --pilot-toggle
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No yaamux session"* ]]
+}
+
+@test "--pilot-hide is a no-op without a running session (exit 0)" {
+  run_yaamux --pilot-hide
+  [ "$status" -eq 0 ]
+}
+
+@test "--pilot-backend persists the chosen backend in .yaamux/state" {
+  run_yaamux --pilot-backend opencode
+  [ "$status" -eq 0 ]
+  [ -f .yaamux/state ]
+  grep -q "^PILOT_BACKEND=opencode$" .yaamux/state
+}
+
+@test "--pilot-show writes the orchestrator prompt to ~/.config/yaamux/pilot-prompt.md" {
+  # Force HOME into a temp dir so we don't clobber the user's real config.
+  tmp_home="$(mktemp -d -t yaamux-pilot-XXXXXX)"
+  HOME="$tmp_home" run_yaamux --pilot-show 2>/dev/null
+  # Call is expected to error (no tmux session), but it should still write
+  # the prompt as a side-effect — _write_pilot_prompt is invoked early.
+  prompt_file="${tmp_home}/.config/yaamux/pilot-prompt.md"
+  # If no backend is installed (CI), we don't get far enough to write the
+  # prompt — skip in that case. Otherwise the file must exist and mention
+  # the pilot's tool surface.
+  if [[ -f "$prompt_file" ]]; then
+    grep -q "yaamux pilot" "$prompt_file"
+    grep -q "send-stdin" "$prompt_file"
+  fi
+  rm -rf "$tmp_home"
+}
+
+@test "--keys advertises --pilot-toggle and --send-stdin" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--pilot-toggle"* ]]
+  [[ "$output" == *"--send-stdin"* ]]
+  [[ "$output" == *"--pilot-show"* ]]
+}
+
+@test "--keys advertises the prefix+P pilot binding" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  # Either the table row or a free-form mention.
+  [[ "$output" == *"P "* ]] || [[ "$output" == *" P "* ]]
+}
+
+# ── _pilot_gate is a no-op when YAAMUX_PILOT isn't set ────────────────────────
+
+@test "human-driven --broadcast does NOT popup-confirm (YAAMUX_PILOT unset)" {
+  # No tmux session and YAAMUX_PILOT unset — the gate should be a no-op,
+  # so we get the usual "no session, sent to 0 agents" path (or similar)
+  # without any popup attempt.
+  run_yaamux --broadcast "hi"
+  # Either succeeds with "Broadcast to 0 agents" or fails cleanly — but
+  # MUST NOT contain a "pilot: cancelled" message.
+  [[ "$output" != *"pilot: cancelled"* ]]
+}
