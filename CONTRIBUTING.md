@@ -4,8 +4,10 @@
 
 **You don't need to learn a build system. You need to read one bash file.**
 
-The whole project is [`yaamux`](./yaamux) — ~600 lines, no toolchain, no
-dependencies. If you can write a shell script, you can ship a feature here.
+The whole project is [`yaamux`](./yaamux) — ~2 000 lines of bash, no
+toolchain, no build step. Runtime needs only `bash`, `tmux`, `git`,
+`python3`, and `curl`. If you can write a shell script, you can ship a
+feature here.
 
 </div>
 
@@ -43,7 +45,7 @@ cd ~/code/yaamux
 mkdir -p /tmp/yaamux-dev && cd /tmp/yaamux-dev
 git init -q && git commit -q --allow-empty -m init
 ~/code/yaamux/yaamux --help                   # sanity check
-~/code/yaamux/yaamux 2                        # spawn 2 agents (kill with Ctrl+Space + D, then --kill)
+~/code/yaamux/yaamux 2                        # spawn 2 agents (detach with Ctrl+Space + d, then --kill)
 ```
 
 You're now editing `~/code/yaamux/yaamux` and running it against
@@ -55,7 +57,7 @@ You're now editing `~/code/yaamux/yaamux` and running it against
 
 ```
 yaamux/
-├── yaamux                     ← the script (the entire program — ~600 LOC)
+├── yaamux                     ← the script (the entire program — ~2 000 LOC)
 ├── VERSION                    ← semver string read by --version
 ├── README.md                  ← user-facing landing page
 ├── YAAMUX.md                  ← full end-user usage guide
@@ -216,8 +218,9 @@ existing tests in [`tests/yaamux.bats`](./tests/yaamux.bats) for the patterns.
 
 ## 🤖 CI matrix
 
-[`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs on every push +
-PR across **Ubuntu** and **macOS**:
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs on every pull
+request and on every push to `main`, across **Ubuntu** and **macOS** — open
+the PR to see CI on a feature branch:
 
 | Step                          | Blocking? |
 |-------------------------------|-----------|

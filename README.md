@@ -64,7 +64,7 @@ You land in a session that looks like this:
               session: yaamux-yourrepo
 ```
 
-`Ctrl+Space + D` to detach — agents keep running. Reattach later with `ymx --attach`. List every yaamux session across every repo on this box with `ymx --list`.
+`Ctrl+Space + d` to detach — agents keep running. Reattach later with `ymx --attach`. List every yaamux session across every repo on this box with `ymx --list`.
 
 ---
 
@@ -252,7 +252,7 @@ ymx --status                     # health of this repo's session
 | `Ctrl+Space` + `r`      | Restart agent in current pane                           |
 | `Ctrl+Space` + `R`      | Restart all dead/idle agents (confirms)                 |
 | `Ctrl+Space` + `L`      | Clear screen + scrollback                               |
-| `Ctrl+Space` + `D`      | Detach (agents keep running)                            |
+| `Ctrl+Space` + `d`      | Detach (agents keep running) — tmux default             |
 | `Ctrl+Space` + `C`      | **Connect-commands popup** (mosh · ssh · `--remote`)    |
 | `Ctrl+Space` + `Q`      | **QR popup** of the mosh snippet (needs `qrencode`)     |
 | `Ctrl+Space` + `?`      | Cheat sheet (popup)                                     |
