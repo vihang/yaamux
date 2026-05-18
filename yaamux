@@ -28,7 +28,8 @@
 #    yaamux --remote-hosts | --auto-attach | --mobile-attach [<repo>] [<pane>] | --mobile-grid
 #    yaamux --connect [--qr]            # print/QR the exact commands to attach from any device
 #    yaamux --prepare-host [--check]    # one-time: symlink mosh-server so iOS mosh:// works (macOS Homebrew)
-#    yaamux --init | --install | --update | --uninstall | --add-docs | --version | --keys
+#    yaamux --init [--copy-skill] | --install | --update | --uninstall | --add-docs | --version | --keys
+#    yaamux --agent-brief [--format markdown|text|json]   # agent-optimized CLI summary
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
 #  Prefix: Ctrl+Space
@@ -3077,7 +3078,7 @@ CONF
     exit 0 ;;
 
   --help|-h)
-    sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$SELF" | sed 's/^# \{0,1\}//'
     exit 0 ;;
 
   "") : ;;

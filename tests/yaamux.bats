@@ -984,16 +984,19 @@ assert a["mode"] == "safe"
 # Drift guard: every flag in the main case block must appear in _brief_data,
 # so a new flag added without brief coverage fails CI before it ships.
 @test "drift guard: every main-case flag is catalogued in _brief_data" {
-  # Extract the data table.
-  brief_flags="$(bash "$YAAMUX_BIN" --agent-brief --format json | python3 -c '
-import json, sys
-print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
-')"
   # _brief_data also contains setup + internal groups, hidden from --format json.
-  # Pull those directly out of the script for a complete catalog.
+  # Pull every group's flags directly from the script for a complete catalog.
   all_catalogued="$(awk '/^_brief_data\(\) \{/,/^}/' "$YAAMUX_BIN" \
     | awk -F'\t' '/^(read|coordinate|background|ship|refused|setup|internal)\t/ {print $2}' \
     | sort -u)"
+
+  # The agent-facing subset that the brief actually renders (visible groups).
+  # Used for the reverse-drift check: every visible brief entry must point
+  # at a real flag — catches a stale row left behind after a flag rename.
+  visible_brief_flags="$(bash "$YAAMUX_BIN" --agent-brief --format json | python3 -c '
+import json, sys
+print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
+' | sort -u)"
 
   # Extract every main case-arm flag from the script. The main case block
   # starts at `^case "\${1:-}" in` and ends at `^esac`. Each line of the
@@ -1012,8 +1015,9 @@ print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
 
   [ -n "$main_flags" ]
   [ -n "$all_catalogued" ]
+  [ -n "$visible_brief_flags" ]
 
-  # Each main-case flag must be in all_catalogued.
+  # Forward drift: every main-case flag must appear in _brief_data.
   missing=""
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
@@ -1025,6 +1029,21 @@ print("\n".join(c["flag"] for c in json.loads(sys.stdin.read())["commands"]))
   if [[ -n "$missing" ]]; then
     echo "Flags missing from _brief_data:"
     printf '%b' "$missing"
+    false
+  fi
+
+  # Reverse drift: every visible brief entry must be a real main-case flag.
+  stale=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if ! grep -qxF -- "$f" <<< "$main_flags"; then
+      stale="${stale}${f}\n"
+    fi
+  done <<< "$visible_brief_flags"
+
+  if [[ -n "$stale" ]]; then
+    echo "Visible brief flags that no longer exist in the case block:"
+    printf '%b' "$stale"
     false
   fi
 }
