@@ -34,6 +34,9 @@
 #  CAVEATS for non-Claude agents:
 #    - the destructive-command guard hook protects CLAUDE panes only
 #    - push notifications fire for CLAUDE panes only (hook-driven)
+#
+#  Copyright (c) 2026 Vihang Patel — MIT License
+#  https://github.com/vihang/yaamux
 # =============================================================================
 
 set -euo pipefail
