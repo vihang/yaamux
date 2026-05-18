@@ -144,6 +144,26 @@ explicit instruction to do so.
     won't false-positive. Status is computed on-the-fly from the log; we
     do NOT mirror it into a stored field that could go stale.
 
+11. **Per-pane agent runtime env (`YAAMUX_*`).** The launch loop exports a
+    contract of variables into every agent pane: `YAAMUX_AGENT_NAME` /
+    `_NUMBER` / `_TOTAL` / `_TYPE` / `YAAMUX_SESSION` / `YAAMUX_PANE_ID` /
+    `YAAMUX_REPO_ROOT` / `YAAMUX_VERSION` / `YAAMUX_AGENT_MODE=safe`. This
+    is the discoverability surface for agents (issue #28 tier 1). Two
+    invariants follow:
+    - `REPO_ROOT="${YAAMUX_REPO_ROOT:-$(git rev-parse --show-toplevel ...)}"`
+      so an agent invoking yaamux from inside a worktree resolves
+      `PANELS_DIR` / `SESSION` to the *main* checkout, not the worktree.
+      Do not bypass this when adding new path-scoped state — read
+      `REPO_ROOT`, not `git rev-parse` directly.
+    - `YAAMUX_AGENT_MODE=safe` is checked above the flag `case` block and
+      refuses `--kill / --clean / --install / --uninstall /
+      --install-service`. When adding a new destructive flag, extend that
+      list. New non-destructive flags need no change.
+
+    `_restart_pane` re-exports the per-agent vars (NAME/NUMBER/TYPE/PANE_ID)
+    when relaunching, since the session-level `set-environment` covers only
+    new shells.
+
 ---
 
 ## Code map
@@ -153,7 +173,7 @@ The `yaamux` file is ordered top-to-bottom as:
 | Section | Responsibility |
 |---------|----------------|
 | Self-location | `SELF`, `YAAMUX_HOME` — resolve real path through the symlink |
-| Project context | `REPO_ROOT`, `SESSION`, `WORKTREES_BASE`, paths |
+| Project context | `REPO_ROOT` (honors `YAAMUX_REPO_ROOT` env override — see invariant #11), `SESSION`, `WORKTREES_BASE`, paths |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
@@ -164,8 +184,9 @@ The `yaamux` file is ordered top-to-bottom as:
 | Control Panel | `_cpanel_show` / `_cpanel_hide` / `_cpanel_toggle` / `_cpanel_self_heal` / `_save_panel_state` / `_status_render` / `_goto_pane` — back `--toggle-panel` / `--panel-show` / `--panel-hide` / `--cpanel` / `--status-render` / `--goto N` |
 | Background panels | `_bg_spawn` / `_bg_tail` / `_bg_list` / `_bg_kill` / `_bg_status` / `_bg_ensure_window` / `_bg_save_meta` / `_bg_read_meta` / `_bg_gen_token` / `_bg_validate_name` — back `--bg` / `--bg-tail` / `--bg-list` / `--bg-kill` |
 | Argument parsing | Splits positional (`N` + `PATTERN`) from flags |
+| Safe-mode guard | `YAAMUX_AGENT_MODE=safe` check above the flag `case` — refuses destructive flags (see invariant #11) |
 | Flag `case` | All `--xxx` commands; each `exit 0`s |
-| Start sequence | preflight → hooks → worktrees → tmux build (incl. parity-based panel pane) → launch → attach |
+| Start sequence | preflight → hooks → worktrees → tmux build (incl. parity-based panel pane) → session-level `set-environment` → launch (exports per-pane `YAAMUX_*` env via send-keys) → attach |
 
 ---
 
