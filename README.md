@@ -1,8 +1,16 @@
 <div align="center">
 
-# yaamux
+```
+   ██╗   ██╗███╗   ███╗██╗  ██╗
+   ╚██╗ ██╔╝████╗ ████║╚██╗██╔╝
+    ╚████╔╝ ██╔████╔██║ ╚███╔╝
+     ╚██╔╝  ██║╚██╔╝██║ ██╔██╗
+      ██║   ██║ ╚═╝ ██║██╔╝ ██╗
+      ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝
+   yaamux · parallel AI agents · one tmux grid · drive from anywhere
+```
 
-**Spawn N AI coding agents in parallel. Drive them from your laptop, phone, or iPad.**
+**Spawn N AI agents in parallel — for any task you'd give to an AI. Drive them from your laptop, phone, or iPad.**
 
 One bash file · one tmux session per repo · zero ceremony.
 
@@ -20,7 +28,7 @@ One bash file · one tmux session per repo · zero ceremony.
 
 You want to:
 
-- 🧠 Run **4 agents working different angles** of the same task — and merge the winner.
+- 🧠 Run **4 agents working different angles** of the same task — draft four versions of a proposal, explore four hypotheses against the same dataset, or refactor a module four different ways. Keep the winner.
 - 🛋️ Check in from your **couch, phone, or kitchen**, not just the desk you started at.
 - 🔔 Get a **push notification** the moment an agent needs your input.
 - 👆 Tap that notification and land in **the exact pane that needs you**.
@@ -54,17 +62,29 @@ You land in a session that looks like this:
 ```
 ┌─────────────────────────┬─────────────────────────┐
 │ 🤖 agent-1  claude      │ 🤖 agent-2  claude      │
-│ > writing tests…        │ > refactoring auth…     │
+│ > drafting Section 3…   │ > reconciling Q4 data…  │
 │                         │                         │
 ├─────────────────────────┼─────────────────────────┤
 │ 🤖 agent-3  claude      │ 🤖 agent-4  claude      │
-│ > tracking a bug…       │ > drafting PR copy…     │
+│ > refactoring auth…     │ > summarizing 40 PDFs…  │
 │                         │                         │
 └─────────────────────────┴─────────────────────────┘
               session: yaamux-yourrepo
 ```
 
 `Ctrl+Space + d` to detach — agents keep running. Reattach later with `ymx --attach`. List every yaamux session across every repo on this box with `ymx --list`.
+
+---
+
+## 🧬 Why git-first?
+
+yaamux uses `git worktree` under the hood — not because your work is code, but because git solves the hardest part of running N agents at once: **structure**.
+
+- **Each agent gets its own clean workspace.** A worktree is just an isolated directory tied to a branch. No file clobbering. No "wait, which agent edited this?".
+- **Full history of every draft.** Whether the file is prose, a spreadsheet, a config, or code, git tracks every revision. Roll back, diff against another agent's version, or cherry-pick the best paragraph from pane 2 into pane 4.
+- **Merge or discard, your call.** Pick the winning result and `git merge` it back. Throw the rest away with `ymx --clean`. Or keep all four branches as parallel drafts.
+
+*If your work lives in files, git can version it — and yaamux can fan it out across N agents.*
 
 ---
 
@@ -175,27 +195,32 @@ Positional form: `ymx [N] [type ...]`. Types: `claude` · `gemini` · `copilot` 
 ```bash
 ymx                              # 4 Claude (default)
 ymx 6                            # 6 Claude
+ymx 4 claude                     # 4 agents — e.g. four drafts of a memo
 ymx claude gemini codex          # 3 panes — one of each
 ymx 8 claude gemini              # 8 panes — cycled: c,g,c,g,c,g,c,g
 ymx 1 codex                      # single Codex agent
-ymx --yolo 4 claude              # full permission bypass (trust the code!)
+ymx --yolo 4 claude              # full permission bypass (trust the task!)
 ```
 
 ---
 
 ## 🥷 Pro moves
 
-### Ship a PR from a pane
+### Publish a finished result
+
+When pane 2 is done, its output is already a real git branch in a real folder — share it however you'd share any file: copy it out, push the branch, open the folder, attach the doc to an email.
 
 ```bash
-ymx --pr 2                       # push pane 2's branch + open PR via gh
-ymx --pr 2 "Fix #123 race" --merge
+cd ../yourrepo-worktrees/agent-2 && git push origin HEAD   # plain git
+ymx --pr 2                                                 # GitHub shortcut: push + open PR via gh
+ymx --pr 2 "Fix #123 race" --merge                         # …and auto-merge once checks pass
 ```
 
 ### Headless: send-prompt-and-collect-output
 
 ```bash
-ymx --exec 1 "summarize TODO comments in src/" 300
+ymx --exec 1 "summarize today's 40 customer emails" 300    # any prompt works
+ymx --exec 1 "summarize TODO comments in src/" 300         # …including code
 ```
 
 Injects the prompt into pane 1, polls until idle (300 s timeout), prints the result. Great for orchestration scripts.
@@ -203,21 +228,24 @@ Injects the prompt into pane 1, polls until idle (300 s timeout), prints the res
 ### Broadcast & sync
 
 ```bash
-ymx --broadcast "rebase onto main and run tests"   # same prompt → every pane
-ymx --sync                                          # toggle keystroke sync
+ymx --broadcast "reread the brief and tighten the intro"   # same prompt → every pane
+ymx --broadcast "rebase onto main and run tests"           # works for any task
+ymx --sync                                                  # toggle keystroke sync
 ```
 
-### Hand a pane to VS Code
+### Hand a pane to your editor
+
+Stop the agent in pane 1 and open its worktree in whatever editor you use — `code .`, `cursor .`, `nvim`, Finder, anything that opens a folder.
 
 ```bash
-ymx --vscode 1                   # stops pane 1's agent, opens its worktree in Code
+ymx --vscode 1                   # shortcut: stops pane 1's agent, opens its worktree in VS Code
 ```
 
 Resume the conversation via **Claude Code panel → Session History** or `claude --resume`. History is shared on disk under `~/.claude/projects/`.
 
-### Bring your env into the worktrees
+### Bring your context into the worktrees
 
-`.env*` (and anything in `.worktreeinclude`) is **copied** into every worktree on creation. Edits stay isolated. Want a single source of truth instead?
+Anything in `.worktreeinclude` is **copied** into every worktree on creation — `.env*` files, a reference dataset, a style guide, a draft outline, a system prompt. Edits stay isolated per pane. Want a single source of truth instead?
 
 ```bash
 ymx --link-env 4 claude          # symlink .env* instead of copy
@@ -303,6 +331,8 @@ Full reference (every flag, every nuance): [YAAMUX.md](./YAAMUX.md).
 
 yaamux is **stateless**. Every invocation resolves the current repo with `git rev-parse` and derives everything from there. **One binary serves every repo.**
 
+*Each pane is an agent. Each agent has its own folder. That folder is a real git branch.*
+
 ```
 your-repo/                        ← main checkout
 your-repo-worktrees/              ← siblings of your repo
@@ -320,13 +350,13 @@ your-repo-worktrees/              ← siblings of your repo
 | Per-project defaults        | `<repo>/.yaamux/config`                                 |
 | Per-project worktrees       | `<repo>/../<repo>-worktrees/agent-N`                    |
 | Per-project hooks/logs      | `<repo>/.claude/`                                       |
-| Agent instructions          | `<repo>/AGENTS.md` (per [agents.md](https://agents.md/))|
+| Agent instructions          | `<repo>/AGENTS.md` — where you tell the agents about your project (instructions, constraints, style guide); per [agents.md](https://agents.md/) |
 | Env copy list               | `<repo>/.worktreeinclude`                               |
 | tmux session                | `yaamux-<repo-name>` (one per repo, no collisions)      |
 | Host aliases                | `~/.config/yaamux/hosts.conf`                           |
 | Notify config               | `~/.config/yaamux/notify.conf`                          |
 
-Merge work back with normal git (`git merge worktree/agent-2`) or `ymx --pr N`. `ymx --clean` skips dirty worktrees; `ymx --clean --force` removes everything.
+Pick the winner with `git merge worktree/agent-2` (or `ymx --pr N` if you're shipping to GitHub). Throw the rest away with `ymx --clean` — it skips dirty worktrees; `ymx --clean --force` removes everything.
 
 ---
 
@@ -343,7 +373,7 @@ Merge work back with normal git (`git merge worktree/agent-2`) or `ymx --pr N`. 
 
 A `yaamux-guard.sh` hook blocks `rm -rf /`, `mkfs`, `dd of=/dev/…` etc. **for Claude panes** (other agents use their own permission systems). Blocked attempts log to `.claude/logs/blocked.log`.
 
-**Cost.** Each agent runs against your real account. 4 Claude agents at $0.03–0.10/min add up to **$20–50/hour** if continuously active. Detach + `--kill` when you're done. Check provider dashboards (claude.ai/usage, etc.).
+**Cost.** Each agent burns real tokens against your account. 4 Claude agents at $0.03–0.10/min add up to **$20–50/hour** if continuously active. Detach + `--kill` when you're done. Check provider dashboards (claude.ai/usage, etc.).
 
 ---
 
@@ -389,6 +419,7 @@ Especially-welcome PRs:
 - New agent types (just three functions: `agent_bin` / `agent_icon` / `agent_cmd`)
 - Platform fixes (WSL, paths with spaces, BSD utils)
 - Mobile snippets for other terminals (Termius, iSH, …)
+- Non-coding workflow examples (writing, research, ops) for the docs
 
 ---
 
