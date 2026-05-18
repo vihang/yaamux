@@ -278,15 +278,25 @@ forge_pr_ci_status() {
 # Pilot = an agent CLI running in the control-panel pane that orchestrates the
 # other agent panes via the existing yaamux flag surface (--list, --send,
 # --send-stdin, --broadcast, --restart, --goto, …). No API key — the agent
-# CLI's own auth handles the LLM call. Backends are the same set as the
-# agent_* helpers above. Preference order is "first installed of".
-PILOT_BACKENDS_DEFAULT="claude opencode gemini codex copilot"
+# CLI's own auth handles the LLM call.
+#
+# PILOT_BACKENDS_DEFAULT lists backends whose orchestrator prompt is actually
+# wired in `pilot_cmd`. Currently that's claude only — its
+# `--append-system-prompt` flag is well-supported and stable. Other backends
+# (codex, gemini, copilot, opencode) are still selectable via an explicit
+# `yaamux --pilot-show <backend>`, but auto-selection skips them so a user
+# without claude isn't dropped into an unprompted pilot.
+PILOT_BACKENDS_DEFAULT="claude"
+PILOT_BACKENDS_KNOWN="claude codex gemini copilot opencode"
 PILOT_PROMPT_FILE="${HOME}/.config/yaamux/pilot-prompt.md"
 
 # Echo space-separated list of pilot backends actually installed on this box.
+# Considers the full known set (`PILOT_BACKENDS_KNOWN`), not just the
+# auto-selection default — `yaamux --pilot-show <backend>` works for any of
+# these, even if `pilot_cmd` doesn't yet pass an orchestrator prompt for it.
 pilot_supported() {
   local b out=""
-  for b in $PILOT_BACKENDS_DEFAULT; do
+  for b in $PILOT_BACKENDS_KNOWN; do
     command -v "$(agent_bin "$b")" >/dev/null 2>&1 && out+="$b "
   done
   echo "${out% }"
@@ -306,13 +316,18 @@ pilot_probe() {
 # to `tmux respawn-pane -k`, which runs it as a shell. Single-quote anything
 # that might contain spaces.
 #
-# Note on resume IDs: each backend's CLI has its own way of identifying a
-# prior conversation (claude `--resume`, codex `resume <id>`, etc.), but
-# capturing the id requires parsing the backend's first-output banner, which
-# differs per CLI and changes between releases. Until that's wired,
-# toggling out and back into the pilot starts a fresh conversation. The
-# `_save_pilot_state` helper exists for operators who want to manually
-# pin a resume id in `.yaamux/pilot.state`.
+# Notes:
+#   * Resume IDs aren't wired — each backend's CLI has its own way of
+#     identifying a prior conversation, and capture requires parsing the
+#     backend's first-output banner, which differs per CLI and changes
+#     between releases. Toggling out and back into the pilot starts a fresh
+#     conversation today.
+#   * Only the `claude` arm currently passes the orchestrator prompt via
+#     `--append-system-prompt`. codex / gemini / copilot / opencode launch
+#     without orchestrator framing — they're accepted by --pilot-show but
+#     auto-selection skips them (see PILOT_BACKENDS_DEFAULT). Adding a
+#     wired prompt for one of these = pick the right CLI flag and emit
+#     it from the matching case arm below.
 pilot_cmd() {
   local backend="$1" flags
   [[ -f "$PILOT_PROMPT_FILE" ]] || _write_pilot_prompt
@@ -322,18 +337,19 @@ pilot_cmd() {
       echo "claude ${flags}"
       ;;
     codex)
+      # No --append-system-prompt equivalent yet; orchestrator framing absent.
       echo "codex --full-auto"
       ;;
     gemini)
-      # GEMINI.md in cwd carries the orchestrator instructions; --yolo bypasses
-      # per-tool approval. Resume support varies by gemini-cli version.
+      # --yolo bypasses per-tool approval. Orchestrator framing absent.
       echo "gemini --yolo"
       ;;
     copilot)
-      # Copilot's prompt-injection surface is weakest of the five — best-effort.
+      # Orchestrator framing absent; weakest prompt-injection surface.
       echo "copilot --allow-all-tools"
       ;;
     opencode)
+      # Orchestrator framing absent — see PILOT_BACKENDS_DEFAULT comment.
       echo "opencode"
       ;;
     *)
@@ -1436,8 +1452,14 @@ _pilot_show() {
   # popup-confirm instead of running silently. YAAMUX_AGENT_MODE=pilot keeps
   # the situational brief honest (sibling agents see "safe"; the pilot sees
   # "pilot") without tripping the safe-mode guard which only refuses "safe".
+  #
+  # tmux runs this string via `sh -c <cmd>`. Don't wrap $launch in another
+  # `bash -lc "..."` — nested quoting would let sh evaluate `$(cat …)` from
+  # the claude launch string and word-split the prompt file's contents into
+  # multiple args. Letting sh -c run $launch directly keeps the `"$(cat …)"`
+  # quotes attached to the right argument.
   if ! tmux respawn-pane -k -t "${SESSION}:agents.${idx}" \
-       "env YAAMUX_PILOT=1 YAAMUX_AGENT_MODE=pilot YAAMUX_SESSION='${SESSION}' YAAMUX_REPO_ROOT='${REPO_ROOT}' bash -lc \"${launch}\"" \
+       "env YAAMUX_PILOT=1 YAAMUX_AGENT_MODE=pilot YAAMUX_SESSION='${SESSION}' YAAMUX_REPO_ROOT='${REPO_ROOT}' ${launch}" \
        2>/dev/null; then
     die "respawn-pane failed (tmux 3.2+ required for pilot mode)."
   fi
@@ -3114,6 +3136,16 @@ case "${1:-}" in
   --pilot-toggle)    _pilot_toggle;           exit 0 ;;
   --pilot-backend)
     NEW="${2:?Usage: yaamux --pilot-backend BACKEND}"
+    # Validate against the known set BEFORE persisting. `.yaamux/state` is
+    # later sourced as shell, so an unvalidated value containing newlines,
+    # `;`, `$()`, etc. would execute on the next yaamux run. Accept the
+    # full KNOWN set (not just DEFAULT) so users can pin a non-default
+    # backend; pilot_cmd handles the per-backend launch — backends without
+    # wired orchestrator framing still launch, just without the prompt.
+    case " $PILOT_BACKENDS_KNOWN " in
+      *" $NEW "*) ;;
+      *) die "Unknown pilot backend '${NEW}'. Valid: ${PILOT_BACKENDS_KNOWN}." ;;
+    esac
     _save_panel_state PILOT_BACKEND "$NEW"
     log "Pilot backend set to '${NEW}'. Toggle with: yaamux --pilot-toggle"
     exit 0 ;;

@@ -235,14 +235,16 @@ ymx --sync                                                  # toggle keystroke s
 
 ### Pilot chat — talk to one agent, drive them all
 
-The Control Panel pane has a second mode: a **pilot chat** powered by whichever agent CLI you already have installed (claude / opencode / gemini / codex / copilot). It reads your natural language and drives the other agent panes via the existing `ymx --send` / `--send-stdin` / `--broadcast` / `--restart` flags. **No API key needed** — auth, billing, and conversation memory all live in the chosen CLI.
+The Control Panel pane has a second mode: a **pilot chat** powered by an installed agent CLI. It reads your natural language and drives the other agent panes via the existing `ymx --send` / `--send-stdin` / `--broadcast` / `--restart` flags. **No API key needed** — auth, billing, and conversation memory all live in the chosen CLI.
+
+Auto-selection picks `claude` — it's the only backend whose orchestrator system prompt is wired today. `codex` / `gemini` / `copilot` / `opencode` are selectable explicitly but launch as plain CLIs (no orchestrator framing) until their prompt mechanism is wired.
 
 ```bash
 ymx --pilot-toggle                # flip Control Panel pane: dashboard ↔ pilot
-ymx --pilot-show                  # explicit enter (picks first installed backend)
-ymx --pilot-show gemini           # pick a specific backend
-ymx --pilot-backend opencode      # set the default (persists per repo)
-ymx --pilot-supported             # → "claude opencode" (whichever you have)
+ymx --pilot-show                  # auto-enter (claude when installed)
+ymx --pilot-show codex            # explicit — no orchestrator framing yet
+ymx --pilot-backend opencode      # pin a default (persists per repo)
+ymx --pilot-supported             # → installed backends from the known set
 ```
 
 Or press **`Ctrl+Space + P`** from inside the session. Destructive calls the pilot makes (`--broadcast`, `--restart`, `--kill`, `--clean`) pop a `tmux display-popup` y/N for the human first — pass `--yes` to skip when the pilot scripts a known-safe batch.

@@ -609,12 +609,19 @@ panel pane, with a yaamux-orchestrator system prompt and `YAAMUX_PILOT=1`
 in its environment. Auth, billing, conversation memory, and tool-use UX
 all belong to the chosen CLI — yaamux holds no API key.
 
-**Backends** (first installed of, in order): `claude` → `opencode` →
-`gemini` → `codex` → `copilot`. Override with `--pilot-backend BACKEND`
-or `PILOT_BACKEND=…` in `.yaamux/state`. List what's available:
+**Backends.** Auto-selection picks `claude` if installed — it's the only
+backend whose orchestrator framing is wired today (via
+`--append-system-prompt`). The other four agent CLIs (`codex`, `gemini`,
+`copilot`, `opencode`) are still selectable via an explicit
+`--pilot-show <backend>` or by pinning with `--pilot-backend <backend>`,
+but they launch without the orchestrator system prompt — you'll get a
+plain agent CLI in the panel pane until that backend's prompt mechanism
+is wired in `pilot_cmd`.
 
 ```bash
-yaamux --pilot-supported            # → "claude opencode" (whichever you have)
+yaamux --pilot-supported            # → installed backends from the known set
+yaamux --pilot-show codex           # explicit — runs codex with no orchestrator framing
+yaamux --pilot-backend opencode     # pin a default for next --pilot-toggle
 ```
 
 **Tool surface.** The pilot shells out to the existing yaamux flag
