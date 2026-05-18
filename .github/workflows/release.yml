@@ -33,16 +33,19 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
 
       - name: Verify VERSION matches tag
         run: |
           set -euo pipefail
           tag="${TAG#v}"
-          file_ver="$(cat VERSION)"
+          # Read VERSION from the tagged commit, not the checked-out ref —
+          # on workflow_dispatch backfills we check out the dispatch branch
+          # (typically main) so the bump step uses main's Formula template
+          # (the source of truth), but the verify still needs the tag's
+          # VERSION to fail loudly on a tag/file mismatch.
+          file_ver="$(curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/VERSION" | tr -d '[:space:]')"
           if [ "$tag" != "$file_ver" ]; then
-            echo "Tag v$tag does not match VERSION file ($file_ver)" >&2
+            echo "Tag v$tag does not match VERSION file at ${TAG} ($file_ver)" >&2
             exit 1
           fi
 
