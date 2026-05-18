@@ -291,6 +291,42 @@ EOF
   [ "$(_remote_normalize_session yaamux-foo-bar)" = "yaamux-foo-bar" ]
 }
 
+@test "_REMOTE_SSH_OPTS: socket dir under \$HOME, has ControlMaster + 10m persist" {
+  HOME_TMP="$(mktemp -d)"
+  export HOME="$HOME_TMP"
+  # Source the constant block (HOSTS_CONF + REMOTE_PATH_PRELUDE + ssh opts).
+  # awk grabs from the `# Common ssh options` header through the closing `)`.
+  body="$(awk '/^_REMOTE_SSH_SOCK_DIR=/,/^\)/' "$YAAMUX_BIN")"
+  eval "$body"
+  [ "$_REMOTE_SSH_SOCK_DIR" = "${HOME_TMP}/.cache/yaamux/sockets" ]
+  joined="$(printf '%s\n' "${_REMOTE_SSH_OPTS[@]}")"
+  [[ "$joined" == *"ControlMaster=auto"* ]]
+  [[ "$joined" == *"ControlPath=${HOME_TMP}/.cache/yaamux/sockets/%C"* ]]
+  [[ "$joined" == *"ControlPersist=10m"* ]]
+  [[ "$joined" == *"ConnectTimeout=10"* ]]
+  rm -rf "$HOME_TMP"
+}
+
+@test "_REMOTE_SSH_SOCK_DIR path length fits macOS 104-byte sun_path limit" {
+  # Worst case: typical macOS /Users/<long>/.cache/yaamux/sockets/<40-char %C>
+  # `%C` is OpenSSH SHA1 hex (40 chars). Assert the formed path stays under
+  # 104 chars even for a 20-char username.
+  user="abcdefghijklmnopqrst"  # 20-char username
+  hex40="0123456789abcdef0123456789abcdef01234567"
+  path="/Users/${user}/.cache/yaamux/sockets/${hex40}"
+  [ "${#path}" -lt 104 ]
+}
+
+@test "--remote creates the ssh socket dir under \$HOME on first use" {
+  HOME_TMP="$(mktemp -d)"
+  # --remote --help triggers _remote_dispatch and so triggers the mkdir,
+  # without actually doing any ssh work.
+  HOME="$HOME_TMP" run_yaamux --remote --help
+  [ "$status" -eq 0 ]
+  [ -d "$HOME_TMP/.cache/yaamux/sockets" ]
+  rm -rf "$HOME_TMP"
+}
+
 # ── YOLO mode ─────────────────────────────────────────────────────────────────
 
 @test "agent_flags picks YOLO when YAAMUX_YOLO=1" {
