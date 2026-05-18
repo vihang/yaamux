@@ -705,17 +705,19 @@ REMOTE_PATH_PRELUDE='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bi
 # pick and attach calls in a single `yaamux --remote` invocation — so a
 # password (if used) is typed once instead of per ssh call.
 #
-# ControlPath uses %u (local user) + %C (16-char hash of connection params).
-# This avoids the Unix-socket 104-char length limit when $TMPDIR is long
-# (macOS /var/folders/…) or the host is long (Tailscale / AWS DNS), and
-# prevents multi-user collisions if /tmp is shared across users.
+# ControlPath socket dir is under $HOME (created on first use). Avoids the
+# Unix-socket 104-byte limit that macOS's TMPDIR (/var/folders/.../T/) plus
+# OpenSSH's 40-char %C hash blows past — that path is already 104 chars
+# before we add anything else. %C alone (a hash of the local-user, host,
+# port, remote-user tuple) gives uniqueness and is fixed-length.
 #
 # ControlPersist=10m so the master survives the picker prompt and any
 # back-and-forth — short enough that stale sockets get cleaned up promptly.
+_REMOTE_SSH_SOCK_DIR="${HOME}/.cache/yaamux/sockets"
 _REMOTE_SSH_OPTS=(
   -o ConnectTimeout=10
   -o ControlMaster=auto
-  -o "ControlPath=${TMPDIR:-/tmp}/yaamux-%u-%C"
+  -o "ControlPath=${_REMOTE_SSH_SOCK_DIR}/%C"
   -o ControlPersist=10m
 )
 
@@ -934,6 +936,10 @@ HELP
 
 # Dispatch --remote subcommands.   Args after '--remote' are passed verbatim.
 _remote_dispatch() {
+  # Make sure the ssh ControlPath dir exists — sockets only created on demand
+  # but ssh needs the parent dir to be writable up front.
+  mkdir -p "$_REMOTE_SSH_SOCK_DIR" 2>/dev/null || true
+
   local use_mosh="${YAAMUX_MOSH:-0}"
   local args=() a
   for a in "$@"; do
