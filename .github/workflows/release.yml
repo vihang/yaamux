@@ -24,6 +24,14 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Validate tag format
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.+-]+)?$ ]]; then
+            echo "Tag '$TAG' is not vX.Y.Z (or vX.Y.Z-prerelease). Did you forget the 'v' prefix?" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
@@ -75,42 +83,46 @@ jobs:
           git config user.email "release-bot@yaamux"
           git config user.name  "yaamux-release-bot"
 
-          # Sync the entire formula from the source repo (so dep/test changes
-          # in the template flow through), then patch in the tagged URL + SHA.
-          cp "$GITHUB_WORKSPACE/Formula/yaamux.rb" Formula/yaamux.rb
-          sed -i.bak \
-            -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${TAG}.tar.gz\"|" \
-            -e "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" \
-            Formula/yaamux.rb
-          rm Formula/yaamux.rb.bak
-
-          if git diff --quiet -- Formula/yaamux.rb; then
-            echo "Formula already up to date for ${TAG}; nothing to do."
-            exit 0
-          fi
-
           branch="bump-yaamux-${TAG}"
-          # If a prior run created the branch, reset it from main so we don't
-          # collide with a stale commit on a re-run.
-          if git ls-remote --exit-code origin "$branch" >/dev/null 2>&1; then
-            git fetch origin "$branch"
-            git checkout -B "$branch" "origin/$branch"
+
+          # Copy the full formula template from source and patch in the
+          # tagged URL + computed SHA. Centralised so the two call sites
+          # below can't drift.
+          apply_formula() {
             cp "$GITHUB_WORKSPACE/Formula/yaamux.rb" Formula/yaamux.rb
             sed -i.bak \
               -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${TAG}.tar.gz\"|" \
               -e "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" \
               Formula/yaamux.rb
             rm Formula/yaamux.rb.bak
+          }
+
+          # Switch to the bump branch FIRST (resetting from origin if a prior
+          # failed run left it behind), so apply_formula's working-tree edits
+          # can't collide with a later checkout.
+          if git ls-remote --exit-code origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            git checkout -B "$branch" "origin/$branch"
           else
             git checkout -b "$branch"
           fi
 
+          apply_formula
+
           if ! git diff --quiet -- Formula/yaamux.rb; then
             git commit -am "yaamux: ${TAG}"
+            git push -u origin "$branch"
           fi
-          git push -u origin "$branch"
 
+          # Open the PR if it doesn't exist yet.
           if ! gh pr view "$branch" --json number >/dev/null 2>&1; then
+            # Nothing to PR if the bump branch has no commits ahead of main
+            # (i.e. the formula on main was already at this tag — e.g.
+            # backfilled by hand). Exit cleanly.
+            if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+              echo "Formula already up to date on main for ${TAG}; nothing to PR."
+              exit 0
+            fi
             gh pr create \
               --base main \
               --head "$branch" \
@@ -118,7 +130,12 @@ jobs:
               --body "Auto-bump from release ${TAG}. Tarball SHA256: \`${SHA}\`."
           fi
 
-          # Try queued auto-merge first (respects branch protection if any);
-          # fall back to an immediate merge on personal repos with no checks.
-          gh pr merge "$branch" --squash --delete-branch --auto \
-            || gh pr merge "$branch" --squash --delete-branch
+          # Merge the PR. Use --auto only when auto-merge is actually enabled
+          # on the repo (so a transient `gh pr merge --auto` failure can't
+          # silently fall back to a protection-bypassing immediate merge).
+          auto_allowed="$(gh repo view --json autoMergeAllowed --jq .autoMergeAllowed)"
+          if [ "$auto_allowed" = "true" ]; then
+            gh pr merge "$branch" --squash --delete-branch --auto
+          else
+            gh pr merge "$branch" --squash --delete-branch
+          fi
