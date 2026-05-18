@@ -135,6 +135,20 @@ ssh  user@host -t 'tmux attach -t yaamux-<repo>'    # fallback
 `yaamux --ssh-config` writes a `Host yaamux` block to `~/.ssh/config`.
 mosh survives sleep, network drops, and LTE↔WiFi handoffs — ideal for phones.
 
+If plain `mosh` errors with **`NoMoshServerArgs - Did not find mosh server
+startup message`**, your remote ssh can't find `mosh-server` (typical on a
+stock macOS desktop — Homebrew installs to `/opt/homebrew/bin` which isn't on
+ssh's non-interactive PATH). Use the form yaamux prints at launch — it bakes a
+`--server=` PATH prelude so it works everywhere:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- tmux attach -t yaamux-<repo>
+```
+
+`yaamux --remote --mosh` and the line in yaamux's launch banner already use
+this form, so the copy-paste from yaamux's own output is the easiest path.
+
 ### Drive remote sessions with `--remote`
 
 If yaamux is installed on your laptop **and** the agents run on another box,
@@ -189,10 +203,36 @@ Then: `yaamux --remote work --list`, `yaamux --remote laptop --zoom 1`, etc.
 | App | Purpose |
 |-----|---------|
 | **Blink Shell** | Full terminal + mosh (one-time purchase) |
+| **Prompt 3** (Panic) | SSH + snippets (one-time purchase) |
 | **Code App** (thebaselab) | SSH + git + Monaco editor (free) |
 | **Claude app** | Drive Claude sessions — Code tab (free) |
 | **ntfy** | Push notifications (free) |
 | **Tailscale** | Zero-config networking (free) |
+
+### iOS-friendly attach (`--mobile-attach`)
+
+A 4-pane tiled grid is unreadable on a phone. `yaamux --mobile-attach` spins up
+an ephemeral grouped tmux session with one pane zoomed, so the screen shows a
+single agent at a time — switch agents with `Ctrl+Space` + arrow keys, detach
+with `Ctrl+Space + D`.
+
+```bash
+yaamux --mobile-attach                # auto-pick the only yaamux- session
+yaamux --mobile-attach myapp          # attach to yaamux-myapp
+yaamux --mobile-attach myapp 2        # ...with pane 2 zoomed (0-based)
+yaamux --mobile-attach                # multi-session: prompts with picker
+```
+
+Use as the body of a Blink Shell / Prompt 3 snippet for one-tap access:
+
+```bash
+mosh --server='export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"; exec mosh-server' \
+     user@host -- yaamux --mobile-attach
+```
+
+yaamux's launch banner prints this exact line — easiest to copy from there.
+Set up one snippet per repo with the repo name appended, or one generic snippet
+that uses the picker when several sessions are running.
 
 ### Per-agent native remote
 
@@ -337,5 +377,6 @@ After first `yaamux N [...]` run:
 | Claude Remote Control fails | Unset `ANTHROPIC_API_KEY`; run `claude auth login` |
 | `Ctrl+Space` does nothing | Disable the macOS input-source shortcut |
 | mosh won't connect | Open UDP 60000-61000, or use Tailscale |
+| `NoMoshServerArgs` / mosh-server not found | Copy the `mosh --server='…' user@host -- …` line from yaamux's launch banner — it bakes the PATH fix in |
 | Session already running | `--attach` to join, or `--kill` then restart |
 | A pane died | `yaamux --restart N` |

@@ -25,7 +25,7 @@
 #    yaamux --restart N | --restart-dead [-y] | --logs | --sync | --pr N [title] [--merge]
 #    yaamux --setup-notify | --ssh-config | --install-service
 #    yaamux --remote <host> [<session>|--list|--status|--zoom N] [--mosh|--ssh]
-#    yaamux --remote-hosts
+#    yaamux --remote-hosts | --mobile-attach [<repo>] [<pane>]
 #    yaamux --init | --install | --update | --uninstall | --add-docs | --version
 #
 #  Each repo gets its own tmux session: yaamux-<repo-name>
@@ -816,6 +816,17 @@ _init_repo() {
 # expanded by the remote shell.
 REMOTE_PATH_PRELUDE='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"'
 
+# Value for `mosh --server=`.  mosh-server is launched by the mosh client over
+# ssh *before* any user shell rc runs, so on a stock macOS desktop ssh's non-
+# interactive PATH (just /usr/bin:/bin) doesn't see Homebrew/MacPorts and mosh
+# bails with "NoMoshServerArgs - Did not find mosh server startup message".
+# Prefixing the same PATH prelude used elsewhere makes mosh-server discoverable
+# without the user having to touch ~/.zshenv.  No-op on Linux where mosh-server
+# already lives in /usr/bin.  Note: do NOT append 'new' — mosh client appends
+# 'new -s -c …' to whatever --server= specifies, so the value ends at the bare
+# mosh-server invocation.
+MOSH_SERVER_CMD="${REMOTE_PATH_PRELUDE}; exec mosh-server"
+
 # Common ssh options reused by every remote call.  ConnectTimeout caps the
 # wait on unreachable hosts.  ControlMaster shares one auth across the list,
 # pick and attach calls in a single `yaamux --remote` invocation — so a
@@ -990,7 +1001,9 @@ attach -t '${session}'"
     command -v mosh &>/dev/null || die "mosh not installed locally — brew install mosh, or drop --mosh."
     log "mosh ${target} → ${session}"
     # sh -lc (not bash) keeps the remote dep at POSIX sh + mosh-server.
-    exec mosh "$target" -- sh -lc "$remote_cmd"
+    # --server= bakes a PATH prelude so mosh-server is found on macOS-Homebrew
+    # remotes (see MOSH_SERVER_CMD).
+    exec mosh --server="$MOSH_SERVER_CMD" "$target" -- sh -lc "$remote_cmd"
   fi
   log "ssh -t ${target} → ${session}"
   exec ssh "${_REMOTE_SSH_OPTS[@]}" -t -- "$target" "$remote_cmd"
@@ -1262,6 +1275,39 @@ case "${1:-}" in
 
   --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
 
+  --mobile-attach)
+    # iOS-friendly attach: ephemeral grouped session with one pane zoomed, so a
+    # 4-agent grid is readable on a phone.  Designed to be the body of a Blink /
+    # Prompt 3 snippet: `mosh ... -- yaamux --mobile-attach [repo] [pane]`.
+    # Session arg accepts bare repo name or full yaamux-<repo>.  With no args,
+    # auto-picks the only running yaamux-* session, or prompts when several
+    # exist — so the snippet works unchanged whatever repo is currently active.
+    shift
+    _ma_sess="${1:-}" _ma_pane="${2:-0}"
+    case "$_ma_pane" in ''|*[!0-9]*) die "PANE must be a non-negative integer, got: ${_ma_pane}" ;; esac
+    if [[ -z "$_ma_sess" ]]; then
+      mapfile -t _ma_list < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^yaamux-' || true)
+      case "${#_ma_list[@]}" in
+        0) die "No yaamux sessions running. Start one with: yaamux" ;;
+        1) _ma_sess="${_ma_list[0]}" ;;
+        *)
+          echo "yaamux sessions:"
+          for _ma_i in "${!_ma_list[@]}"; do
+            printf "  %d) %s\n" "$((_ma_i+1))" "${_ma_list[$_ma_i]#yaamux-}"
+          done
+          read -rp "Pick [1]: " _ma_choice
+          _ma_choice="${_ma_choice:-1}"
+          case "$_ma_choice" in ''|*[!0-9]*) die "Invalid choice: ${_ma_choice}" ;; esac
+          (( _ma_choice >= 1 && _ma_choice <= ${#_ma_list[@]} )) || die "Out of range: ${_ma_choice}"
+          _ma_sess="${_ma_list[$((_ma_choice-1))]}"
+          ;;
+      esac
+    fi
+    case "$_ma_sess" in yaamux-*) ;; *) _ma_sess="yaamux-${_ma_sess}" ;; esac
+    tmux has-session -t "$_ma_sess" 2>/dev/null || die "Session not found: ${_ma_sess}"
+    [[ -x "$MOBILE_ATTACH" ]] || _write_mobile_attach
+    exec "$MOBILE_ATTACH" "$_ma_sess" "$_ma_pane" ;;
+
   --kill)
     tmux kill-session -t "$SESSION" 2>/dev/null && log "Killed ${SESSION}." || warn "Not running."
     exit 0 ;;
@@ -1428,7 +1474,10 @@ CONF
     _write_settings_json
     echo ""
     log "Done. In the ntfy app, subscribe to topic '${TOPIC}' on ${SERVER}"
-    log "Blink snippet '${BK}' → ssh -t $(whoami)@${HOST_DISPLAY} bash ${MOBILE_ATTACH} ${SESSION} 0"
+    log "Blink snippet '${BK}' (iOS-friendly, picks current session, zooms pane 0):"
+    log "  mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --mobile-attach"
+    log "ssh fallback (no mosh on remote):"
+    log "  ssh -t $(whoami)@${HOST_DISPLAY} 'yaamux --mobile-attach'"
     exit 0 ;;
 
   --help|-h)
@@ -1677,9 +1726,13 @@ done
 echo ""
 echo -e " ${CYAN}Remote:${NC}"
 if $MOSH_OK; then
-  echo -e "   mosh $(whoami)@${HOST_DISPLAY} -- tmux attach -t ${SESSION}"
+  echo -e "   ${BOLD}iOS${NC} (one pane, zoomed — paste into Blink / Prompt 3 snippet):"
+  echo -e "     mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- yaamux --mobile-attach"
+  echo -e "   ${BOLD}Full grid${NC}:"
+  echo -e "     mosh --server='${MOSH_SERVER_CMD}' $(whoami)@${HOST_DISPLAY} -- tmux attach -t ${SESSION}"
 else
-  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'tmux attach -t ${SESSION}'"
+  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'yaamux --mobile-attach'        # iOS-friendly"
+  echo -e "   ssh $(whoami)@${HOST_DISPLAY} -t 'tmux attach -t ${SESSION}'   # full grid"
 fi
 $HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
 echo ""
