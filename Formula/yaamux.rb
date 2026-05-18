@@ -20,6 +20,10 @@ class Yaamux < Formula
   depends_on "python@3"
   depends_on "mosh"     # for `--remote --mosh` and the mobile-attach deep link
   depends_on "qrencode" # for `--connect --qr` and the `Ctrl+Space Q` QR popup
+  depends_on "lazygit"  # `git` window — worktrees / branches / PRs (`Ctrl+Space G`)
+  depends_on "gh"       # PR ops: --pr / --watch-pr / --auto-merge / --ci-status (GitHub host)
+  depends_on "git-delta" # syntax-highlighted diffs in --diff and inside lazygit
+  depends_on "bat"      # syntax-highlighted file viewing as the session $PAGER
 
   def install
     bin.install "yaamux"

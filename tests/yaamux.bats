@@ -794,6 +794,172 @@ PY
   grep -qxF ".yaamux/panels/" .gitignore
 }
 
+# ── Git-host abstraction (_host_provider / _host_cli) ─────────────────────────
+
+# Helper: source the host-helper trio so each test can eval them once.
+# Keep in sync if a new helper joins the _host_* family.
+_host_helpers_body() {
+  awk '/^_host_url_hostname\(\) \{/,/^}/' "$YAAMUX_BIN"
+  printf '\n'
+  awk '/^_host_provider\(\) \{/,/^}/'     "$YAAMUX_BIN"
+  printf '\n'
+  awk '/^_host_cli\(\) \{/,/^}/'          "$YAAMUX_BIN"
+}
+
+@test "_host_provider: explicit YAAMUX_GIT_HOST overrides auto-detection" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_GIT_HOST=gitlab; [ "$(_host_provider)" = "gitlab" ]
+  YAAMUX_GIT_HOST=github; [ "$(_host_provider)" = "github" ]
+  YAAMUX_GIT_HOST=other ; [ "$(_host_provider)" = "other"  ]
+}
+
+@test "_host_provider: auto-detects github / gitlab / other from origin URL" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  git -C "$TEST_REPO" remote add origin https://github.com/foo/bar.git
+  [ "$(_host_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin git@gitlab.com:foo/bar.git
+  [ "$(_host_provider)" = "gitlab" ]
+  git -C "$TEST_REPO" remote set-url origin https://bitbucket.org/foo/bar.git
+  [ "$(_host_provider)" = "other" ]
+}
+
+# Drift-guard: the tightened hostname-only matcher must NOT mis-detect a
+# repo whose path contains a forge name (e.g., github.com/foo/gitlab-mirror).
+@test "_host_provider: does not mis-detect forge from path segments" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  git -C "$TEST_REPO" remote add origin https://github.com/foo/gitea-mirror.git
+  [ "$(_host_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin https://github.com/foo/gitlab-tools.git
+  [ "$(_host_provider)" = "github" ]
+}
+
+# Drift-guard: every supported URL form must strip user@ and :port before
+# matching, so `ssh://git@github.com/foo/bar.git` and the SCP-style
+# `git@github.com:foo/bar.git` resolve to identical hosts (and identical
+# providers). Same for HTTPS basic-auth URLs.
+@test "_host_url_hostname: strips user@ and :port across schemes" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  # SCP-style — already known to work
+  [ "$(_host_url_hostname 'git@github.com:foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo
+  [ "$(_host_url_hostname 'ssh://git@github.com/foo/bar.git')" = "github.com" ]
+  # ssh:// with userinfo + port
+  [ "$(_host_url_hostname 'ssh://git@github.com:22/foo/bar.git')" = "github.com" ]
+  # https:// with basic auth
+  [ "$(_host_url_hostname 'https://user:pass@gitlab.example.com/foo/bar.git')" = "gitlab.example.com" ]
+  # Plain https://
+  [ "$(_host_url_hostname 'https://github.com/foo/bar.git')" = "github.com" ]
+  # Empty / unrecognized
+  [ "$(_host_url_hostname '')" = "" ]
+  [ "$(_host_url_hostname 'not-a-url')" = "" ]
+}
+
+# End-to-end via _host_provider: ssh:// with userinfo must route correctly
+# (was the original bug — `ssh://git@github.com/...` was hitting `other`).
+@test "_host_provider: ssh:// with user@ routes to the right forge" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  unset YAAMUX_GIT_HOST
+  git -C "$TEST_REPO" remote add origin ssh://git@github.com/foo/bar.git
+  [ "$(_host_provider)" = "github" ]
+  git -C "$TEST_REPO" remote set-url origin ssh://git@gitlab.com:22/foo/bar.git
+  [ "$(_host_provider)" = "gitlab" ]
+}
+
+@test "_host_cli: maps provider to gh / glab / empty" {
+  eval "$(_host_helpers_body)"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_GIT_HOST=github; [ "$(_host_cli)" = "gh"   ]
+  YAAMUX_GIT_HOST=gitlab; [ "$(_host_cli)" = "glab" ]
+  YAAMUX_GIT_HOST=other ; [ "$(_host_cli)" = ""     ]
+}
+
+# ── New PR/CI/diff flags — usage validation ───────────────────────────────────
+
+@test "--watch-pr without N fails with usage hint" {
+  run_yaamux --watch-pr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --watch-pr N"* ]]
+}
+
+@test "--auto-merge without N fails with usage hint" {
+  run_yaamux --auto-merge
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --auto-merge N"* ]]
+}
+
+@test "--diff without N fails with usage hint" {
+  run_yaamux --diff
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Usage: yaamux --diff N"* ]]
+}
+
+@test "--ci-status with no N exits 0 when there are no worktrees" {
+  run_yaamux --ci-status
+  [ "$status" -eq 0 ]
+}
+
+@test "--diff N dies clean when the worktree is missing" {
+  run_yaamux --diff 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Worktree"* ]]
+  [[ "$output" == *"not found"* ]]
+}
+
+@test "--watch-pr N dies clean when the worktree is missing" {
+  run_yaamux --watch-pr 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Worktree"* ]]
+  [[ "$output" == *"not found"* ]]
+}
+
+# Pluggability proof: YAAMUX_GIT_HOST=gitlab routes into the gitlab) case in
+# every _host_pr_* helper. Currently those cases die with "not implemented";
+# a future change that wires up `glab` should update this test to assert
+# success instead of the placeholder message.
+@test "YAAMUX_GIT_HOST=gitlab routes PR ops into the gitlab) dispatch" {
+  wt_base="$(dirname "$TEST_REPO")/$(basename "$TEST_REPO")-worktrees"
+  mkdir -p "${wt_base}/agent-1"
+  YAAMUX_GIT_HOST=gitlab run_yaamux --watch-pr 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not implemented"* ]]
+  rm -rf "$wt_base"
+}
+
+# ── --keys / --help advertise the new surface ─────────────────────────────────
+
+@test "--keys lists the new PR/CI/diff flags and the \`git\` window binding" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--watch-pr"* ]]
+  [[ "$output" == *"--auto-merge"* ]]
+  [[ "$output" == *"--ci-status"* ]]
+  [[ "$output" == *"--diff N"* ]]
+  [[ "$output" == *"\`git\` window"* ]]
+}
+
+@test "--help header advertises the new flags" {
+  run_yaamux --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--watch-pr"* ]]
+  [[ "$output" == *"--ci-status"* ]]
+  [[ "$output" == *"--diff"* ]]
+}
+
+@test "--init adds .yaamux/lazygit/ to .gitignore" {
+  touch .gitignore
+  run_yaamux --init
+  [ "$status" -eq 0 ]
+  grep -qxF ".yaamux/lazygit/" .gitignore
+}
+
 # ── Agent discoverability (issue #28) ─────────────────────────────────────────
 # Tier-1 surface for agents running inside yaamux:
 #   (1) the scaffolded AGENTS.md ships an inline recipe of yaamux commands
