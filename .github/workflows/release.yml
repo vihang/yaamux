@@ -86,8 +86,7 @@ jobs:
           branch="bump-yaamux-${TAG}"
 
           # Copy the full formula template from source and patch in the
-          # tagged URL + computed SHA. Centralised so the two call sites
-          # below can't drift.
+          # tagged URL + computed SHA.
           apply_formula() {
             cp "$GITHUB_WORKSPACE/Formula/yaamux.rb" Formula/yaamux.rb
             sed -i.bak \
@@ -97,9 +96,23 @@ jobs:
             rm Formula/yaamux.rb.bak
           }
 
-          # Switch to the bump branch FIRST (resetting from origin if a prior
-          # failed run left it behind), so apply_formula's working-tree edits
-          # can't collide with a later checkout.
+          # Short-circuit: if main is already at the target tag, there's
+          # nothing to bump. Apply on main and check for diff.
+          apply_formula
+          if git diff --quiet -- Formula/yaamux.rb; then
+            echo "Formula already up to date on main for ${TAG}; nothing to bump."
+            # Clean up a stale bump branch left by a prior failed run.
+            if git ls-remote --exit-code origin "$branch" >/dev/null 2>&1; then
+              echo "Deleting stale ${branch} branch on origin."
+              git push origin --delete "$branch"
+            fi
+            exit 0
+          fi
+          # Reset the working tree before switching branches.
+          git checkout -- Formula/yaamux.rb
+
+          # Switch to the bump branch (resetting from origin if a prior run
+          # left it behind), then re-apply.
           if git ls-remote --exit-code origin "$branch" >/dev/null 2>&1; then
             git fetch origin "$branch"
             git checkout -B "$branch" "origin/$branch"
@@ -114,15 +127,11 @@ jobs:
             git push -u origin "$branch"
           fi
 
-          # Open the PR if it doesn't exist yet.
-          if ! gh pr view "$branch" --json number >/dev/null 2>&1; then
-            # Nothing to PR if the bump branch has no commits ahead of main
-            # (i.e. the formula on main was already at this tag — e.g.
-            # backfilled by hand). Exit cleanly.
-            if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
-              echo "Formula already up to date on main for ${TAG}; nothing to PR."
-              exit 0
-            fi
+          # Ensure an OPEN PR exists for this branch (closed PRs from prior
+          # failed runs shouldn't be picked up for merge — `gh pr view <branch>`
+          # would happily return a closed PR, so use `gh pr list --state open`).
+          open_pr_count="$(gh pr list --head "$branch" --state open --json number --jq 'length')"
+          if [ "$open_pr_count" -eq 0 ]; then
             gh pr create \
               --base main \
               --head "$branch" \
