@@ -547,20 +547,39 @@ Diffs are also auto-piped through `delta` from any shell inside the session
 (yaamux sets `GIT_PAGER=delta` and `PAGER=bat` as session env vars when those
 binaries are installed — no global gitconfig changes).
 
-### Pluggable git host
+### Pluggable forge
 
 All four flags + `--pr` route through a small dispatch family
-(`_host_provider` / `_host_cli` / `_host_pr_*`) instead of inlining `gh`.
-Adding GitLab later means filling in the `gitlab)` case in each helper —
-no other call site touches the host CLI directly. The provider is auto-
-detected from `git remote get-url origin`; override with `YAAMUX_GIT_HOST`:
+(`forge_provider` / `forge_bin` / `forge_label` / `forge_create_pr` /
+`forge_view_pr` / `forge_pr_checks_watch` / `forge_merge_pr` /
+`forge_pr_ci_status`) instead of inlining `gh`. Adding a new forge =
+filling in its case in each helper — no other call site touches a forge
+CLI directly. The forge is auto-detected from `git remote get-url origin`;
+override with `YAAMUX_FORGE`.
+
+| Forge  | CLI    | Detection regex                              | `--pr` create / merge | `--watch-pr` / `--ci-status` / `--auto-merge` (separate flag) |
+|--------|--------|----------------------------------------------|-----------------------|----------------------------------------------------------------|
+| github | `gh`   | `*github.com*`                               | ✓ working             | ✓ working                                                       |
+| gitlab | `glab` | `*gitlab.com*` / `*gitlab.*`                 | ✓ working             | ✗ TODO (Phase 1 follow-up)                                      |
+| gitea  | `tea`  | `*codeberg.org*` / `*gitea.com*` / `*gitea*` | partial (create only) | ✗ TODO (Phase 1 follow-up)                                      |
+| other  | —      | fallback                                     | ✗ unsupported         | ✗ unsupported                                                   |
 
 ```bash
-YAAMUX_GIT_HOST=gitlab yaamux --watch-pr 1
-# → dies with "PR checks --watch not implemented for gitlab."  (placeholder)
+# Auto-detected (origin is a github.com URL → uses gh)
+yaamux --pr 2
+
+# Forced — useful for self-hosted GitLab / Gitea, or to test dispatch
+YAAMUX_FORGE=gitlab yaamux --pr 2          # uses glab mr create
+YAAMUX_FORGE=gitea  yaamux --pr 2          # uses tea pr create
+YAAMUX_FORGE=gitlab yaamux --watch-pr 1
+# → dies with "forge_pr_checks_watch for gitlab not implemented yet —
+#   Phase 1 follow-up (see #25)."
 ```
 
-This is the follow-up flagged in #25 ("pluggable provider architecture").
+Implementation tracked in [#25](https://github.com/vihang/yaamux/issues/25)
+("Pluggable provider architecture"). Phase 1 (this) lands the forge
+dispatch + working `glab` create/merge + working `tea` create. Remaining
+ops + notifier/multiplexer abstractions are subsequent phases.
 
 ---
 

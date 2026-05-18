@@ -133,60 +133,97 @@ agent_idle_pattern() {
   esac
 }
 
-# ── Git host helpers ──────────────────────────────────────────────────────────
+# ── Forge helpers (pluggable git host) ────────────────────────────────────────
 # Mirrors the agent_* triad: one switch per provider per op. Every call into a
-# host CLI (gh, glab, …) goes through this family — never inline `gh`/`glab`
-# elsewhere. Adding GitLab later = filling in the `gitlab)` cases here.
-# Override auto-detection with $YAAMUX_GIT_HOST.
-_host_provider() {
-  [[ -n "${YAAMUX_GIT_HOST:-}" ]] && { echo "$YAAMUX_GIT_HOST"; return; }
+# forge CLI (gh, glab, tea, …) goes through this family — never inline
+# `gh`/`glab`/`tea` elsewhere. Adding a forge later = filling in its case in
+# each helper. Override auto-detection with $YAAMUX_FORGE.
+#
+# Phase 1 support (implementation of #25 Phase 1):
+#   - github (gh):   full — all ops working
+#   - gitlab (glab): create + merge working; view/watch/ci-status TODO
+#   - gitea  (tea):  create working; rest TODO
+#   - other:         all dispatch arms die with a helpful message
+forge_provider() {
+  [[ -n "${YAAMUX_FORGE:-}" ]] && { echo "$YAAMUX_FORGE"; return; }
   local url; url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
   case "$url" in
-    *github.com*)            echo github ;;
-    *gitlab.com*|*gitlab.*)  echo gitlab ;;
-    *)                       echo other  ;;
+    *github.com*)                       echo github ;;
+    *gitlab.com*|*gitlab.*)             echo gitlab ;;
+    *codeberg.org*|*gitea.com*|*gitea*) echo gitea  ;;
+    *)                                  echo other  ;;
   esac
 }
-_host_cli() {
-  case "$(_host_provider)" in
+forge_bin() {
+  case "$(forge_provider)" in
     github) echo gh   ;;
     gitlab) echo glab ;;
+    gitea)  echo tea  ;;
     *)      echo ""   ;;
   esac
 }
+# Human-readable label for help text / errors.
+forge_label() {
+  case "$(forge_provider)" in
+    github) echo "GitHub" ;;
+    gitlab) echo "GitLab" ;;
+    gitea)  echo "Gitea"  ;;
+    *)      forge_provider ;;
+  esac
+}
 # PR create — $1=wt $2=base $3=branch $4=title(opt). Echoes PR URL on success.
-_host_pr_create() {
-  case "$(_host_provider)" in
+# Each forge keeps its native flag spelling (target-branch/source-branch for
+# glab; base/head for tea) — the wrapper routes; it doesn't normalize CLI
+# vocabulary across forges.
+forge_create_pr() {
+  local args
+  case "$(forge_provider)" in
     github)
-      local args=(--fill --base "$2" --head "$3")
+      args=(--fill --base "$2" --head "$3")
       [[ -n "${4:-}" ]] && args+=(--title "$4")
       gh pr create "${args[@]}" ;;
-    *) die "PR create not implemented for $(_host_provider). Set YAAMUX_GIT_HOST or open the PR manually." ;;
+    gitlab)
+      args=(--fill --target-branch "$2" --source-branch "$3")
+      [[ -n "${4:-}" ]] && args+=(--title "$4")
+      glab mr create "${args[@]}" ;;
+    gitea)
+      args=(--base "$2" --head "$3")
+      [[ -n "${4:-}" ]] && args+=(--title "$4")
+      tea pr create "${args[@]}" ;;
+    *) die "PR create not implemented for $(forge_provider). Set YAAMUX_FORGE=github|gitlab|gitea, or open the PR manually." ;;
   esac
 }
 # PR lookup — $1=wt → echoes PR URL for the worktree's current branch.
-_host_pr_url() {
-  case "$(_host_provider)" in
+forge_view_pr() {
+  case "$(forge_provider)" in
     github) gh -R "$(git -C "$1" remote get-url origin)" pr view --json url -q .url ;;
-    *)      die "PR lookup not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_view_pr for gitlab not implemented yet — Phase 1 follow-up (see #25)." ;;
+    gitea)  die "forge_view_pr for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR lookup not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_checks_watch() {
-  case "$(_host_provider)" in
+forge_pr_checks_watch() {
+  case "$(forge_provider)" in
     github) gh pr checks --watch "$1" ;;
-    *)      die "PR checks --watch not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_pr_checks_watch for gitlab not implemented yet — Phase 1 follow-up (see #25). Try: glab ci status --live --branch <branch>" ;;
+    gitea)  die "forge_pr_checks_watch for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR checks --watch not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_merge_auto() {
-  case "$(_host_provider)" in
-    github) gh pr merge --squash --auto "$1" ;;
-    *)      die "PR auto-merge not implemented for $(_host_provider)." ;;
+forge_merge_pr() {
+  case "$(forge_provider)" in
+    github) gh   pr merge --squash --auto       "$1" ;;
+    gitlab) glab mr merge --squash --auto-merge "$1" ;;
+    gitea)  die "forge_merge_pr for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR auto-merge not implemented for $(forge_provider)." ;;
   esac
 }
-_host_pr_ci_status() {
-  case "$(_host_provider)" in
+forge_pr_ci_status() {
+  case "$(forge_provider)" in
     github) gh pr checks "$1" ;;
-    *)      die "PR CI status not implemented for $(_host_provider)." ;;
+    gitlab) die "forge_pr_ci_status for gitlab not implemented yet — Phase 1 follow-up (see #25). Try: glab ci status --branch <branch>" ;;
+    gitea)  die "forge_pr_ci_status for gitea not implemented yet — Phase 1 follow-up (see #25)." ;;
+    *)      die "PR CI status not implemented for $(forge_provider)." ;;
   esac
 }
 
@@ -1410,8 +1447,8 @@ _pr_pane() {
   local agent="agent-$((idx+1))"
   local branch="worktree/${agent}"
   local wt="${WORKTREES_BASE}/${agent}"
-  local cli; cli="$(_host_cli)"
-  [[ -n "$cli" ]] || die "No git host CLI configured (provider: $(_host_provider))."
+  local cli; cli="$(forge_bin)"
+  [[ -n "$cli" ]] || die "No forge CLI configured (forge: $(forge_provider)). Set YAAMUX_FORGE=github|gitlab|gitea."
   command -v "$cli" &>/dev/null || die "${cli} not found — brew install ${cli}; ${cli} auth login"
   [[ -d "$wt" ]] || die "Worktree $wt not found."
   local base="${YAAMUX_DEFAULT_BASE:-origin/main}"; base="${base#origin/}"
@@ -1419,11 +1456,11 @@ _pr_pane() {
   git -C "$wt" push -u origin "$branch" || die "git push failed."
   log "Creating PR (base: ${base})..."
   local pr_url
-  pr_url="$(_host_pr_create "$wt" "$base" "$branch" "$title")" || die "PR create failed."
+  pr_url="$(forge_create_pr "$wt" "$base" "$branch" "$title")" || die "PR create failed."
   echo "$pr_url"
   if [[ "$merge" == "true" ]]; then
     log "Enabling auto-merge (squash)..."
-    _host_pr_merge_auto "$pr_url" || die "auto-merge failed."
+    forge_merge_pr "$pr_url" || die "auto-merge failed."
     log "Auto-merge enabled. Run 'yaamux --clean' after merge completes to remove the worktree."
   fi
 }
@@ -1431,7 +1468,7 @@ _pr_pane() {
 # Resolve a 0-based agent ordinal to "wt|branch|pr_url". Does NOT consult tmux —
 # the disk-based agent-N convention is independent of where any tmux pane sits
 # (same rationale as --pr's comment above).
-# stderr from _host_pr_url is intentionally NOT suppressed so the underlying
+# stderr from forge_view_pr is intentionally NOT suppressed so the underlying
 # error (e.g. "PR lookup not implemented for gitlab" or gh's "no pull requests
 # found for branch …") reaches the user; we just add the follow-up hint.
 _pane_pr() {
@@ -1439,13 +1476,13 @@ _pane_pr() {
   wt="${WORKTREES_BASE}/agent-$((idx+1))"
   branch="worktree/agent-$((idx+1))"
   [[ -d "$wt" ]] || die "Worktree $wt not found."
-  url="$(_host_pr_url "$wt")" \
+  url="$(forge_view_pr "$wt")" \
     || die "No PR for ${branch} (open one with: yaamux --pr $((idx+1)))"
   echo "${wt}|${branch}|${url}"
 }
-_watch_pr_pane()   { local r; r="$(_pane_pr "$1")"; _host_pr_checks_watch "${r##*|}"; }
-_auto_merge_pane() { local r; r="$(_pane_pr "$1")"; _host_pr_merge_auto   "${r##*|}"; }
-_ci_status_pane()  { local r; r="$(_pane_pr "$1")"; _host_pr_ci_status    "${r##*|}"; }
+_watch_pr_pane()   { local r; r="$(_pane_pr "$1")"; forge_pr_checks_watch "${r##*|}"; }
+_auto_merge_pane() { local r; r="$(_pane_pr "$1")"; forge_merge_pr   "${r##*|}"; }
+_ci_status_pane()  { local r; r="$(_pane_pr "$1")"; forge_pr_ci_status    "${r##*|}"; }
 
 # Diff vs origin/main for agent N's worktree. Pipes through delta if installed
 # (forces color so delta lights up); else falls back to git's own pager.

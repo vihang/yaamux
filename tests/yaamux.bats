@@ -794,38 +794,54 @@ PY
   grep -qxF ".yaamux/panels/" .gitignore
 }
 
-# ── Git-host abstraction (_host_provider / _host_cli) ─────────────────────────
+# ── Git-host abstraction (forge_provider / forge_bin) ─────────────────────────
 
-@test "_host_provider: explicit YAAMUX_GIT_HOST overrides auto-detection" {
-  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+@test "forge_provider: explicit YAAMUX_FORGE overrides auto-detection" {
+  body="$(awk '/^forge_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
   eval "$body"
   REPO_ROOT="$TEST_REPO"
-  YAAMUX_GIT_HOST=gitlab; [ "$(_host_provider)" = "gitlab" ]
-  YAAMUX_GIT_HOST=github; [ "$(_host_provider)" = "github" ]
-  YAAMUX_GIT_HOST=other ; [ "$(_host_provider)" = "other"  ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_provider)" = "gitlab" ]
+  YAAMUX_FORGE=github; [ "$(forge_provider)" = "github" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_provider)" = "gitea"  ]
+  YAAMUX_FORGE=other ; [ "$(forge_provider)" = "other"  ]
 }
 
-@test "_host_provider: auto-detects github and gitlab from origin URL" {
-  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+@test "forge_provider: auto-detects github, gitlab, gitea, codeberg, other" {
+  body="$(awk '/^forge_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
   eval "$body"
   REPO_ROOT="$TEST_REPO"
-  unset YAAMUX_GIT_HOST
+  unset YAAMUX_FORGE
   git -C "$TEST_REPO" remote add origin https://github.com/foo/bar.git
-  [ "$(_host_provider)" = "github" ]
+  [ "$(forge_provider)" = "github" ]
   git -C "$TEST_REPO" remote set-url origin git@gitlab.com:foo/bar.git
-  [ "$(_host_provider)" = "gitlab" ]
+  [ "$(forge_provider)" = "gitlab" ]
+  git -C "$TEST_REPO" remote set-url origin https://codeberg.org/foo/bar.git
+  [ "$(forge_provider)" = "gitea" ]
+  git -C "$TEST_REPO" remote set-url origin https://gitea.example.com/foo/bar.git
+  [ "$(forge_provider)" = "gitea" ]
   git -C "$TEST_REPO" remote set-url origin https://bitbucket.org/foo/bar.git
-  [ "$(_host_provider)" = "other" ]
+  [ "$(forge_provider)" = "other" ]
 }
 
-@test "_host_cli: maps provider to gh / glab / empty" {
-  body="$(awk '/^_host_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
-  body+=$'\n'"$(awk '/^_host_cli\(\) \{/,/^}/' "$YAAMUX_BIN")"
+@test "forge_bin: maps provider to gh / glab / tea / empty" {
+  body="$(awk '/^forge_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  body+=$'\n'"$(awk '/^forge_bin\(\) \{/,/^}/' "$YAAMUX_BIN")"
   eval "$body"
   REPO_ROOT="$TEST_REPO"
-  YAAMUX_GIT_HOST=github; [ "$(_host_cli)" = "gh"   ]
-  YAAMUX_GIT_HOST=gitlab; [ "$(_host_cli)" = "glab" ]
-  YAAMUX_GIT_HOST=other ; [ "$(_host_cli)" = ""     ]
+  YAAMUX_FORGE=github; [ "$(forge_bin)" = "gh"   ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_bin)" = "glab" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_bin)" = "tea"  ]
+  YAAMUX_FORGE=other ; [ "$(forge_bin)" = ""     ]
+}
+
+@test "forge_label: human-readable names" {
+  body="$(awk '/^forge_provider\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  body+=$'\n'"$(awk '/^forge_label\(\) \{/,/^}/' "$YAAMUX_BIN")"
+  eval "$body"
+  REPO_ROOT="$TEST_REPO"
+  YAAMUX_FORGE=github; [ "$(forge_label)" = "GitHub" ]
+  YAAMUX_FORGE=gitlab; [ "$(forge_label)" = "GitLab" ]
+  YAAMUX_FORGE=gitea ; [ "$(forge_label)" = "Gitea"  ]
 }
 
 # ── New PR/CI/diff flags — usage validation ───────────────────────────────────
@@ -867,14 +883,14 @@ PY
   [[ "$output" == *"not found"* ]]
 }
 
-# Pluggability proof: YAAMUX_GIT_HOST=gitlab routes into the gitlab) case in
-# every _host_pr_* helper. Currently those cases die with "not implemented";
+# Pluggability proof: YAAMUX_FORGE=gitlab routes into the gitlab) case in
+# every forge_pr_* helper. Currently those cases die with "not implemented";
 # a future change that wires up `glab` should update this test to assert
 # success instead of the placeholder message.
-@test "YAAMUX_GIT_HOST=gitlab routes PR ops into the gitlab) dispatch" {
+@test "YAAMUX_FORGE=gitlab routes PR ops into the gitlab) dispatch" {
   wt_base="$(dirname "$TEST_REPO")/$(basename "$TEST_REPO")-worktrees"
   mkdir -p "${wt_base}/agent-1"
-  YAAMUX_GIT_HOST=gitlab run_yaamux --watch-pr 1
+  YAAMUX_FORGE=gitlab run_yaamux --watch-pr 1
   [ "$status" -ne 0 ]
   [[ "$output" == *"not implemented"* ]]
   rm -rf "$wt_base"
