@@ -26,6 +26,14 @@ teardown() {
   [[ "$output" == *"yaamux"*"Agents Multiplexer"* ]]
 }
 
+@test "--keys prints cheat sheet with prefix and CLI sections" {
+  run_yaamux --keys
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Ctrl+Space"* ]]
+  [[ "$output" == *"yaamux CLI"* ]]
+  [[ "$output" == *"--broadcast"* ]]
+}
+
 @test "--list with no sessions reports empty (human)" {
   run_yaamux --list
   [ "$status" -eq 0 ]

@@ -82,6 +82,7 @@ multiple repos simultaneously without collision.
 | `--install-service` | macOS LaunchAgent — auto-start this repo's agents on login |
 | `--remote <host> [args]` | Drive a remote host's yaamux sessions — see below |
 | `--remote-hosts` | List host aliases from `~/.config/yaamux/hosts.conf` |
+| `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
 | `--help` / `--version` | Inline help / version + install source |
 
 The `--yolo` and `--link-env` modifiers combine with positional args
@@ -109,14 +110,18 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + arrows | Move between panes |
 | `Ctrl+Space` + `Z` | Zoom / unzoom current pane |
 | `Ctrl+Space` + `W` | Window list (agents / remote-srv / logs) |
-| `Ctrl+Space` + `[` | Scroll mode (`q` to exit) |
-| `Ctrl+Space` + `y` | Copy selection → system clipboard |
+| `Ctrl+Space` + `[` | Enter scroll mode (`q` to exit, `/` to search) |
+| &nbsp;&nbsp;↳ `y` or `Enter` | (in scroll mode) Copy selection → system clipboard |
 | `Ctrl+Space` + `S` | Toggle sync mode |
 | `Ctrl+Space` + `r` | Restart the agent in the current pane |
 | `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
 | `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `D` | Detach (agents keep running) |
+| `Ctrl+Space` + `?` | Cheat sheet (popup — `q` to close) |
+| `Ctrl+Space` + `/` | List all tmux key bindings |
 | Mouse click | Focus a pane |
+
+Run `yaamux --keys` from any shell for the same cheat sheet (no tmux needed).
 
 > macOS: `Ctrl+Space` may be the input-source switcher. Disable it under
 > System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
