@@ -1328,10 +1328,16 @@ _cpanel_show() {
 }
 
 # Remove the control-panel pane and re-tile the agents. Persists intent even
-# when no session is running so the next start respects the choice.
+# when no session is running so the next start respects the choice. Clears
+# the pilot-active signals unconditionally — if the panel was in pilot mode
+# when --panel-hide / prefix-p removed it, sibling agents would otherwise
+# keep seeing a stale `@yaamux-pilot-active` after the orchestrator pane is
+# gone.
 _cpanel_hide() {
   _save_panel_state CONTROL_PANEL_VISIBLE false
   tmux has-session -t "$SESSION" 2>/dev/null || return 0
+  tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+  tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
   local idx
   idx="$(_panel_pane_idx)"
   [[ -z "$idx" ]] && return 0
@@ -1368,6 +1374,13 @@ _cpanel_self_heal() {
   local idx
   idx="$(_panel_pane_idx)"
   if [[ -z "$idx" ]]; then
+    # Panel pane fully gone (user `tmux kill-pane`'d it, or older yaamux
+    # never created one). _cpanel_show always starts in dashboard mode, so
+    # clear the pilot-active signals first — without this, an agent who
+    # ran `tmux kill-pane` on a pilot panel would leave the orchestrator
+    # signal stuck on the session.
+    tmux set-option    -u -t "$SESSION" @yaamux-pilot-active 2>/dev/null || true
+    tmux set-environment -u -t "$SESSION" YAAMUX_PILOT_ACTIVE 2>/dev/null || true
     _cpanel_show
     return
   fi
@@ -2091,12 +2104,13 @@ you have a set of environment variables that describe your situation:
 | `YAAMUX_AGENT_NAME`   | e.g. `agent-3` — your worktree directory name |
 | `YAAMUX_AGENT_NUMBER` | 1-based, e.g. `3` |
 | `YAAMUX_AGENT_TOTAL`  | total agents in this session |
-| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` · `opencode` |
 | `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
 | `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
 | `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
 | `YAAMUX_VERSION`      | yaamux version string |
-| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent — destructive flags are refused |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent · `pilot` inside the orchestrator chat — destructive flags refused while `safe` |
+| `YAAMUX_PILOT_ACTIVE` | backend name (e.g. `claude`) if a pilot is driving this session — unset when the panel is in dashboard mode |
 
 Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
 next to the parent of `YAAMUX_REPO_ROOT`.
