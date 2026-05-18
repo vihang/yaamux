@@ -28,9 +28,8 @@ class Yaamux < Formula
   end
 
   test do
-    expected = (pkgshare/"VERSION").read.strip
-    assert_match "yaamux #{expected}", shell_output("#{bin}/yaamux --version")
-    assert_match "yaamux #{expected}", shell_output("#{bin}/ymx --version")
+    assert_match "yaamux #{version}", shell_output("#{bin}/yaamux --version")
+    assert_match "yaamux #{version}", shell_output("#{bin}/ymx --version")
     assert_match "Agents Multiplexer", shell_output("#{bin}/yaamux --help")
   end
 end
