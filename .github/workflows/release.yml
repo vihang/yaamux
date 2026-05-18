@@ -1,70 +1,124 @@
 name: Release
 
-# Triggered when a v* tag is pushed (e.g., `git tag v0.1.0 && git push --tags`).
-# Builds the release tarball, computes SHA256, and opens a formula-bump PR
-# against vihang/homebrew-tap. Manual PR merge after smoke test.
+# Triggered when a v* tag is pushed (e.g., `git tag v0.1.0 && git push --tags`),
+# or manually via workflow_dispatch with an explicit tag (for backfills).
+#
+# Steps: create GitHub release → compute tarball SHA256 → open + auto-merge
+# a formula-bump PR against vihang/homebrew-tap (requires TAP_PAT secret).
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re-)release, e.g. v0.1.2'
+        required: true
 
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Verify VERSION matches tag
         run: |
-          tag="${GITHUB_REF#refs/tags/v}"
+          set -euo pipefail
+          tag="${TAG#v}"
           file_ver="$(cat VERSION)"
           if [ "$tag" != "$file_ver" ]; then
             echo "Tag v$tag does not match VERSION file ($file_ver)" >&2
             exit 1
           fi
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (if missing)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "yaamux ${GITHUB_REF_NAME}" \
-            --generate-notes
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping create."
+          else
+            gh release create "$TAG" \
+              --title "yaamux $TAG" \
+              --generate-notes
+          fi
 
       - name: Compute tarball SHA256
         id: sha
         run: |
-          # GitHub generates the tarball at the predictable URL once the release exists.
-          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
-          curl -sL "$url" -o release.tar.gz
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          curl -fsSL "$url" -o release.tar.gz
           sha="$(sha256sum release.tar.gz | awk '{print $1}')"
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           echo "Tarball SHA256: $sha"
 
       - name: Bump Homebrew tap formula
+        if: ${{ env.TAP_PAT != '' }}
         env:
-          TAP_PAT: ${{ secrets.TAP_PAT }}   # PAT with repo scope on vihang/homebrew-tap
-        if: env.TAP_PAT != ''
+          TAP_PAT: ${{ secrets.TAP_PAT }}
+          GH_TOKEN: ${{ secrets.TAP_PAT }}
+          SHA: ${{ steps.sha.outputs.sha256 }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          sha="${{ steps.sha.outputs.sha256 }}"
+          set -euo pipefail
+
           git clone "https://x-access-token:${TAP_PAT}@github.com/vihang/homebrew-tap.git" tap
           cd tap
           git config user.email "release-bot@yaamux"
-          git config user.name "yaamux-release-bot"
-          # Update url + sha in the formula
+          git config user.name  "yaamux-release-bot"
+
+          # Sync the entire formula from the source repo (so dep/test changes
+          # in the template flow through), then patch in the tagged URL + SHA.
+          cp "$GITHUB_WORKSPACE/Formula/yaamux.rb" Formula/yaamux.rb
           sed -i.bak \
-            -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${tag}.tar.gz\"|" \
-            -e "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" \
+            -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${TAG}.tar.gz\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" \
             Formula/yaamux.rb
           rm Formula/yaamux.rb.bak
-          branch="bump-yaamux-${tag}"
-          git checkout -b "$branch"
-          git commit -am "yaamux: ${tag}"
+
+          if git diff --quiet -- Formula/yaamux.rb; then
+            echo "Formula already up to date for ${TAG}; nothing to do."
+            exit 0
+          fi
+
+          branch="bump-yaamux-${TAG}"
+          # If a prior run created the branch, reset it from main so we don't
+          # collide with a stale commit on a re-run.
+          if git ls-remote --exit-code origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            git checkout -B "$branch" "origin/$branch"
+            cp "$GITHUB_WORKSPACE/Formula/yaamux.rb" Formula/yaamux.rb
+            sed -i.bak \
+              -e "s|^  url \".*\"|  url \"https://github.com/vihang/yaamux/archive/refs/tags/${TAG}.tar.gz\"|" \
+              -e "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" \
+              Formula/yaamux.rb
+            rm Formula/yaamux.rb.bak
+          else
+            git checkout -b "$branch"
+          fi
+
+          if ! git diff --quiet -- Formula/yaamux.rb; then
+            git commit -am "yaamux: ${TAG}"
+          fi
           git push -u origin "$branch"
-          gh pr create --title "yaamux: ${tag}" --body "Auto-bump from release ${tag}" \
-            --base main --head "$branch"
-        # If TAP_PAT isn't configured, skip the bump and let it be done manually.
+
+          if ! gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "yaamux: ${TAG}" \
+              --body "Auto-bump from release ${TAG}. Tarball SHA256: \`${SHA}\`."
+          fi
+
+          # Try queued auto-merge first (respects branch protection if any);
+          # fall back to an immediate merge on personal repos with no checks.
+          gh pr merge "$branch" --squash --delete-branch --auto \
+            || gh pr merge "$branch" --squash --delete-branch
