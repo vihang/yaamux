@@ -95,6 +95,7 @@ multiple repos simultaneously without collision.
 | `--connect [--qr]` | Print exact connect commands (+ optional QR encoding `mosh://user@host` for one-tap open in Blink / Prompt / Termius) |
 | `--prepare-host [--check]` | One-time: symlink `mosh-server` into `/usr/local/bin` so iOS clients opening the QR'd `mosh://` URL find it (macOS Homebrew hosts only — `--check` is read-only) |
 | `--keys` | Print the in-tmux key & CLI cheat sheet (also opens in-session via `Ctrl+Space + ?`) |
+| `--agent-brief [--format markdown\|text\|json]` | Agent-optimized CLI summary: situational context from `YAAMUX_*` env + a curated list of flags grouped by use. Markdown by default; `json` is the agent-parseable form |
 | `--help` / `--version` | Inline help / version + install source |
 
 The `--yolo` and `--link-env` modifiers combine with positional args
@@ -622,6 +623,49 @@ outside the tmux session sees no change — only panes that yaamux itself
 started are in safe mode. To override (e.g. an agent that legitimately
 needs to clean up its sibling), the operator can run the command from
 their own shell.
+
+### `yaamux --agent-brief` — programmatic CLI brief
+
+An agent can fetch a structured summary of its situation + the yaamux
+commands available to it at any time:
+
+```bash
+yaamux --agent-brief                       # markdown (default)
+yaamux --agent-brief --format text         # plain prose (non-Claude agents)
+yaamux --agent-brief --format json         # most agent-parseable
+```
+
+The JSON form is the recommended programmatic surface — its `commands`
+array contains `{group, flag, summary}` entries, grouped as `read`,
+`coordinate`, `background`, `ship`, or `refused`. The envelope also
+includes the situational context (`agent.name`, `agent.number`, …) from
+the per-pane `YAAMUX_*` env, with `in_session: false` and null fields
+when called from a shell outside any yaamux pane.
+
+The brief is **the canonical drift-free reference** — every flag in the
+main case block is catalogued in the same source-of-truth table, and a
+bats drift-guard test fails CI if a new flag ships without an entry. The
+human-targeted YAAMUX.md and `--keys` cheat sheet can lag; the brief
+cannot.
+
+### Claude Code skill
+
+When you run `yaamux --init`, yaamux symlinks
+`${REPO_ROOT}/.claude/skills/yaamux` → the skill directory shipped with
+yaamux itself (`${YAAMUX_HOME}/skills/yaamux/` for git installs,
+`${prefix}/share/yaamux/skills/yaamux/` for Homebrew). Claude Code's
+skill loader picks `SKILL.md` up automatically: when an agent is running
+inside a yaamux session, Claude Code surfaces the skill's recipes
+without anyone telling it to read anything.
+
+The symlink keeps the skill in sync with `yaamux --update`. To vendor a
+snapshot you can edit independently, run `yaamux --init --copy-skill`
+instead — that path produces a regular directory and is NOT added to
+`.gitignore`.
+
+Non-Claude agents (Gemini, Codex, Copilot) won't consume
+`.claude/skills/`, but they still benefit from Tier 1's enriched
+`AGENTS.md` and can call `yaamux --agent-brief --format text` directly.
 
 ---
 

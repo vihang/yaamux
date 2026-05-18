@@ -1,0 +1,130 @@
+---
+name: yaamux
+description: Use when you are running inside a yaamux session (detect via the YAAMUX_SESSION env var or a .yaamux/ directory in the repo root). Helps coordinate with sibling agents in adjacent worktrees, start non-blocking background work, list/inspect panels, and open PRs. Skip for tmux work outside a yaamux session.
+---
+
+# yaamux
+
+You are an AI coding agent running inside a **yaamux** session — a tmux
+multiplexer that spawns N agents in parallel, one per git worktree.
+This skill teaches you how to use yaamux's CLI to coordinate with your
+siblings instead of working in isolation.
+
+## Are you in a yaamux session?
+
+You are if any of these is true:
+
+- `$YAAMUX_SESSION` is set in your shell environment (the canonical signal)
+- The repo root contains a `.yaamux/` directory
+- `yaamux --status` exits zero
+
+If none hold, do not use these commands — they assume yaamux state.
+
+## Your situational context
+
+When you are in a session, the following env vars describe your position:
+
+| Var | Meaning |
+|-----|---------|
+| `YAAMUX_AGENT_NAME`   | your worktree name (e.g. `agent-3`) |
+| `YAAMUX_AGENT_NUMBER` | your 1-based ordinal (e.g. `3`) |
+| `YAAMUX_AGENT_TOTAL`  | total agents in this session |
+| `YAAMUX_AGENT_TYPE`   | `claude` · `gemini` · `copilot` · `codex` |
+| `YAAMUX_SESSION`      | tmux session name (e.g. `yaamux-myapp`) |
+| `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
+| `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
+| `YAAMUX_VERSION`      | yaamux version string |
+| `YAAMUX_AGENT_MODE`   | `safe` — destructive flags are refused |
+
+Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
+next to the parent of `YAAMUX_REPO_ROOT`. Your own pwd is your worktree.
+
+## Recipes
+
+### Look around before you start
+
+```bash
+yaamux --status              # who's alive in this session, what state
+yaamux --list --json         # other yaamux sessions on this machine
+yaamux --bg-list             # background panels already running
+```
+
+### Run a long task without blocking your shell
+
+If a build / test-watch / dev-server takes more than ~30 seconds and you
+do not need to read its output line-by-line as it runs, put it in a
+**background panel**. Each panel is a dedicated tmux pane with its output
+captured to disk:
+
+```bash
+yaamux --bg ci "pnpm test --run"            # start
+yaamux --bg-tail ci --follow                # block until done
+# ...output...
+# OFFSET=12345
+# STATUS=done
+# RC=0
+```
+
+To poll instead of block:
+
+```bash
+yaamux --bg-tail ci                         # read so-far, learn OFFSET
+# later:
+yaamux --bg-tail ci --from 12345            # resume from where you left off
+```
+
+Status values: `running` · `done` (rc=0) · `failed` (rc≠0) · `killed`
+(SIGINT, rc=130) · `unknown`.
+
+### Hand work to a sibling agent
+
+When agent N is the right one to handle something (e.g. they own a
+different feature area), send them the prompt directly instead of
+doing it yourself in your worktree:
+
+```bash
+yaamux --send 2 "Run the integration tests against the auth module"
+```
+
+For a synchronous request — send and wait for the agent to go idle:
+
+```bash
+yaamux --exec 3 "Summarize the diff in your branch" 120
+```
+
+`--exec` polls the target pane for that agent's idle pattern, with a
+timeout in seconds (default 60).
+
+### Open a PR for your work
+
+When your worktree is ready:
+
+```bash
+yaamux --pr "$YAAMUX_AGENT_NUMBER" "feat: ship the new auth flow"
+# add --merge to enable auto-merge after CI:
+yaamux --pr "$YAAMUX_AGENT_NUMBER" "..." --merge
+```
+
+This pushes your branch (`worktree/<your-agent-name>`) and runs
+`gh pr create` against the repo's default base.
+
+## Do not run these
+
+`YAAMUX_AGENT_MODE=safe` is set in your shell — yaamux refuses these
+flags so a curious agent cannot tear down its own session:
+
+- `yaamux --kill` — kills the session you are inside
+- `yaamux --clean` / `--clean --force` — removes worktrees (including yours)
+- `yaamux --install` / `--uninstall` / `--install-service` — host config
+
+If you genuinely need one of these to run, ask the operator (the human
+who started yaamux) to run it from their own shell outside the session.
+
+## Reference
+
+- `yaamux --agent-brief` — emits this brief programmatically (also
+  `--format text` and `--format json`).
+- `yaamux --keys` — full CLI cheat sheet, including flags this skill
+  intentionally omits (control-panel / mobile-attach / remote ops are
+  operator surfaces).
+- Long-form docs: `YAAMUX.md` at the repo root.

@@ -29,6 +29,8 @@ git worktree, in a tiled tmux grid — manageable locally and remotely. It is
 | `README.md` | Install instructions for the yaamux repo | Yes — update on install-flow change |
 | `AGENTS.md` | This file — developer/agent guide (CLAUDE.md → symlink) | Yes — update on architecture change |
 | `VERSION` | Semver string read by `--version` | Yes — bump on release |
+| `skills/yaamux/SKILL.md` | Claude Code skill auto-symlinked by `--init` | Yes — keep recipes current; the drift-guard bats test only covers flags, not skill prose |
+| `Formula/yaamux.rb` | Homebrew formula (source of truth for the tap) | Yes — ship new top-level dirs (`skills/`) via `pkgshare.install` |
 | `tests/yaamux.bats` | bats-core integration test suite | Yes — keep current with new flags |
 | `.github/workflows/ci.yml` | CI: bash -n, heredoc check, shellcheck, bats | Yes — keep matrix in sync |
 
@@ -164,6 +166,26 @@ explicit instruction to do so.
     when relaunching, since the session-level `set-environment` covers only
     new shells.
 
+12. **`_brief_data` is the source of truth for the CLI surface.** Issue #29
+    tier 2 introduces `yaamux --agent-brief [--format markdown|text|json]`,
+    backed by a single tab-separated table in the `_brief_data` function.
+    Every flag in the main `case "${1:-}"` block must have a row in that
+    table — either under an agent-facing group (`read`, `coordinate`,
+    `background`, `ship`, `refused`) which renders in the brief, or under
+    `setup` / `internal` which are catalogued but hidden. The bats
+    drift-guard test (`drift guard: every main-case flag is catalogued in
+    _brief_data`) fails CI if a new flag ships without an entry. When
+    adding a flag: pick its group based on whether an agent should
+    discover and run it.
+
+13. **Claude Code skill at `skills/yaamux/SKILL.md`.** Tracked in the repo;
+    `_init_repo` symlinks it into each repo's `.claude/skills/yaamux`.
+    `_skill_src` looks under `${YAAMUX_HOME}/skills/yaamux` (git installs)
+    then `${YAAMUX_HOME}/../share/yaamux/skills/yaamux` (brew). Adding a
+    new top-level dir like `skills/` means the brew Formula needs a
+    matching `pkgshare.install` line — verify both lookup paths resolve
+    after any reorg.
+
 ---
 
 ## Code map
@@ -174,6 +196,7 @@ The `yaamux` file is ordered top-to-bottom as:
 |---------|----------------|
 | Self-location | `SELF`, `YAAMUX_HOME` — resolve real path through the symlink |
 | Project context | `REPO_ROOT` (honors `YAAMUX_REPO_ROOT` env override — see invariant #11), `SESSION`, `WORKTREES_BASE`, paths |
+| Agent brief | `_brief_data` / `_brief_markdown` / `_brief_text` / `_brief_json` / `_emit_brief` / `_skill_src` — back `--agent-brief` and the skill install (see invariants #12, #13) |
 | Defaults & flags | `DEFAULT_*`, `MAX_AGENTS`, per-agent auto-accept flag vars |
 | `agent_*` helpers | `agent_bin` / `agent_icon` / `agent_cmd` — the only type switch |
 | Embedded writers | `_write_settings_json` / `_write_guard_hook` / `_write_notify_hook` / `_write_mobile_attach` / `_write_cpanel` |
@@ -200,7 +223,11 @@ The `yaamux` file is ordered top-to-bottom as:
 - User-facing strings: concise, lowercase-leaning, no emoji except the agent
   icons already defined.
 - When adding a flag: add it to the `case` block, the `--help` header comment
-  block (lines ~15–40), the summary footer if relevant, and `YAAMUX.md`.
+  block (lines ~15–40), the summary footer if relevant, `YAAMUX.md`, and
+  the `_brief_data` table (under the right group — `read` / `coordinate` /
+  `background` / `ship` / `refused` if agents should see it, or `setup` /
+  `internal` to acknowledge but hide it). The drift-guard bats test fails
+  CI if the table is missing the new flag.
 - When adding a tmux key binding (any new `tmux bind-key -T prefix …` line in
   the start sequence): also add a row to `_print_keys()` (`In-session keys`
   section) and to the shortcuts table in `YAAMUX.md`. The `Ctrl+Space + ?`
