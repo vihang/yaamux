@@ -139,4 +139,4 @@ missing.
 
 ## License
 
-MIT.
+MIT © [Vihang Patel](https://github.com/vihang)
