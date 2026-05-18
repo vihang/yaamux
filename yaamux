@@ -704,11 +704,19 @@ REMOTE_PATH_PRELUDE='export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bi
 # wait on unreachable hosts.  ControlMaster shares one auth across the list,
 # pick and attach calls in a single `yaamux --remote` invocation — so a
 # password (if used) is typed once instead of per ssh call.
+#
+# ControlPath uses %u (local user) + %C (16-char hash of connection params).
+# This avoids the Unix-socket 104-char length limit when $TMPDIR is long
+# (macOS /var/folders/…) or the host is long (Tailscale / AWS DNS), and
+# prevents multi-user collisions if /tmp is shared across users.
+#
+# ControlPersist=10m so the master survives the picker prompt and any
+# back-and-forth — short enough that stale sockets get cleaned up promptly.
 _REMOTE_SSH_OPTS=(
   -o ConnectTimeout=10
   -o ControlMaster=auto
-  -o "ControlPath=${TMPDIR:-/tmp}/yaamux-ssh-%r@%h:%p"
-  -o ControlPersist=60s
+  -o "ControlPath=${TMPDIR:-/tmp}/yaamux-%u-%C"
+  -o ControlPersist=10m
 )
 
 # Resolve an alias from ${HOSTS_CONF} to a real ssh target.
