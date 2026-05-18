@@ -240,10 +240,20 @@ same output — no need to drop to a shell:
 | `Ctrl+Space Q` | QR encoding `mosh://user@host` — scan with iOS Camera, opens in Blink / Prompt / Termius |
 
 `prefix Q` is the fastest way to onboard a phone: scan with the iOS Camera app,
-tap the result, paste into Blink Shell. The QR encodes the full
-`mosh --server='…' user@host -- yaamux --auto-attach` line — so once scanned,
-the iPad/iPhone gets the right UI automatically (zoom on iPhone, grid on iPad,
-full grid on a tablet held in landscape with a tiny font).
+tap the result, and Blink Shell (or Prompt 3 / Termius) opens with the mosh
+connection ready. Once you're at the remote shell, run `yaamux --auto-attach`
+to get the right UI for your device (zoom on iPhone, grid on iPad, full grid
+on a tablet held in landscape with a tiny font).
+
+The QR encodes `mosh://user@host` rather than the full shell snippet. iOS Vision
+recognizes URL schemes over email-address patterns, so the scan offers a one-tap
+"Open in <terminal>" action instead of misreading `user@host.tld` as an email
+and offering Mail.app. The trade-off: a URL scheme can't carry the
+`--server='export PATH=…; exec mosh-server'` PATH fix that the full snippet does.
+If the QR scan hits `NoMoshServerArgs` (typical on macOS Homebrew hosts where
+`mosh-server` sits in `/opt/homebrew/bin`, off SSH's default PATH), either copy
+the full mosh line printed above the QR — it bakes the PATH fix — or shim it
+once with `sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server`.
 
 **Cross-device handoff from iPad/phone**: the popup bindings also work *inside*
 the iPad's mobile-grid and the iPhone's mob-`$$` sessions (those sessions set

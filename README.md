@@ -117,9 +117,9 @@ Inside any running yaamux session, hit `Ctrl+Space + Q`:
               (full QR)
 ```
 
-Open the iOS Camera, scan, tap, paste into [Blink Shell](https://blink.sh).
+Open the iOS Camera, scan, **tap** — Blink Shell (or Prompt 3 / Termius) opens with the mosh connection ready to go. Once you're at the shell, run `yaamux --auto-attach` and the phone gets the right UI automatically.
 
-The QR encodes the full `mosh --server='…' user@host -- yaamux --auto-attach` line — once scanned, the phone gets the right UI automatically.
+The QR encodes `mosh://user@host` so iOS routes the scan as a URL (one-tap "Open in Blink") instead of misreading `user@host.tld` as an email address. The full `mosh --server='…' -- yaamux --auto-attach` line — with the Homebrew PATH fix baked in — is still printed *above* the QR for desktop copy/paste, and it's the recommended path if you hit `NoMoshServerArgs` from a bare scan (the URL scheme can't carry the `--server` arg).
 
 ### Auto-route by terminal width — `--auto-attach`
 

@@ -1366,6 +1366,10 @@ case "${1:-}" in
         printf '  %bQR%b — scan with iOS Camera → tap result → opens in Blink / Prompt 3 / Termius:\n' "$BOLD" "$NC"
         printf '    (encodes %s — run  yaamux --auto-attach  once connected)\n' "$_c_qr_payload"
         qrencode -t ansiutf8 -- "$_c_qr_payload"
+        printf '    If mosh fails with NoMoshServerArgs, mosh-server is off SSH'\''s default PATH on\n'
+        printf '    the remote.  Either copy/paste the full mosh line above (it bakes the PATH fix),\n'
+        # shellcheck disable=SC2016  # $(…) is literal shell that the user copy-pastes, not for us to expand
+        printf '    or shim it:  sudo ln -s "$(command -v mosh-server)" /usr/local/bin/mosh-server\n'
         echo ""
       else
         warn "qrencode not installed — brew install qrencode  (then re-run with --qr)"
