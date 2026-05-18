@@ -72,6 +72,7 @@ multiple repos simultaneously without collision.
 | `--broadcast "x"` | Send the same prompt to every pane |
 | `--pr N [title] [--merge]` | Push pane N's branch + open PR via `gh` |
 | `--restart N` | Restart pane N (relaunches its agent type) |
+| `--restart-dead [-y]` | Restart every pane whose agent has exited or died (`-y` skips confirm) |
 | `--logs` | Jump to the live-logs window |
 | `--sync` | Toggle synchronize-panes (keystrokes → all panes) |
 | `--yolo` | Modifier: launch agents with full permission bypass |
@@ -111,6 +112,9 @@ Prefix is **Ctrl+Space**.
 | `Ctrl+Space` + `[` | Scroll mode (`q` to exit) |
 | `Ctrl+Space` + `y` | Copy selection → system clipboard |
 | `Ctrl+Space` + `S` | Toggle sync mode |
+| `Ctrl+Space` + `r` | Restart the agent in the current pane |
+| `Ctrl+Space` + `R` | Restart every dead / idle agent (confirms) |
+| `Ctrl+Space` + `L` | Clear screen + scrollback (fixes a garbled pane) |
 | `Ctrl+Space` + `D` | Detach (agents keep running) |
 | Mouse click | Focus a pane |
 
