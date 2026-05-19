@@ -3086,10 +3086,19 @@ _apply_session_config() {
 
   # Wire delta + bat into the session env if installed. New processes spawned
   # in any pane inherit these; the user's global gitconfig is untouched.
-  command -v delta &>/dev/null && \
-    tmux set-environment -t "$SESSION" GIT_PAGER "delta --paging=never"
-  command -v bat &>/dev/null && \
-    tmux set-environment -t "$SESSION" PAGER "bat --paging=auto"
+  # If the binary isn't present on this run, unset the session var so a stale
+  # value from a previous run (when delta/bat used to exist) doesn't leak
+  # into new shells and break `git`/pager invocations.
+  if command -v delta &>/dev/null; then
+    tmux set-environment    -t "$SESSION" GIT_PAGER "delta --paging=never"
+  else
+    tmux set-environment -u -t "$SESSION" GIT_PAGER 2>/dev/null || true
+  fi
+  if command -v bat &>/dev/null; then
+    tmux set-environment    -t "$SESSION" PAGER "bat --paging=auto"
+  else
+    tmux set-environment -u -t "$SESSION" PAGER 2>/dev/null || true
+  fi
 
   # Options
   tmux set-option -g -t "$SESSION" history-limit $SCROLLBACK
@@ -3145,11 +3154,22 @@ _apply_session_config() {
   tmux set-option    -t "$SESSION" status-interval 5
   tmux set-option    -t "$SESSION" status-style "bg=colour235 fg=white"
   # Status-left: prefix indicator + session + the active pane's worktree
-  # (basename of pane_current_path) + the branch of that worktree. tmux
-  # substitutes `#{pane_current_path}` BEFORE the `#(…)` shell runs, so the
-  # subshell sees the absolute path of whichever pane currently has focus.
+  # (basename of pane_current_path) + the branch of that worktree.
+  #
+  # Quoting: `#{b:pane_current_path}` is tmux's native basename modifier —
+  # evaluated by tmux, never reaches a shell, so even a directory name
+  # containing `'` / `"` / `$` / `\\` renders without breaking parsing.
+  # For the git lookup we still need a shell, but we route the path
+  # through `#{q:pane_current_path}` (tmux's quote modifier — escapes
+  # `\\`, `,`, `;`, `'`, `"`, `#`, `$` with backslashes) and embed it in
+  # shell DOUBLE quotes. The combination is safe against arbitrary path
+  # characters: tmux's `\$` becomes a literal `$` inside `"..."`, tmux's
+  # `\"` becomes a literal `"`, and tmux's `\'` is harmless backslash-
+  # apostrophe (no expansion). On the rare path containing those chars
+  # the branch may not resolve, but the `|| echo '—'` keeps the status
+  # line rendering instead of erroring out at parse time.
   tmux set-option    -t "$SESSION" status-left \
-    "#{?client_prefix,#[fg=colour226 bold]⌨ ,}#[fg=colour46 bold] ◉ ${SESSION} #[fg=white]│ #[fg=colour220]#(basename '#{pane_current_path}' 2>/dev/null) #[fg=white]@#[fg=colour39]#(git -C '#{pane_current_path}' rev-parse --abbrev-ref HEAD 2>/dev/null || echo '—') #[fg=white]│ #[fg=colour226]#{?synchronize-panes,⚡SYNC ,}#[fg=white]"
+    "#{?client_prefix,#[fg=colour226 bold]⌨ ,}#[fg=colour46 bold] ◉ ${SESSION} #[fg=white]│ #[fg=colour220]#{b:pane_current_path} #[fg=white]@#[fg=colour39]#(git -C \"#{q:pane_current_path}\" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '—') #[fg=white]│ #[fg=colour226]#{?synchronize-panes,⚡SYNC ,}#[fg=white]"
   tmux set-option    -t "$SESSION" status-left-length 140
   # Status-right embeds a per-tick refresh via #(): cheap shell-out to update
   # @yaamux-state on every status interval. The agent count is derived live
