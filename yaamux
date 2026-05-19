@@ -1234,21 +1234,23 @@ _refresh_pane_states() {
   done
 }
 
-# Resolve a 1-based agent number to its tmux pane_index. The control-panel
-# pane is excluded — so "agent 1" is always the first @yaamux-role=agent pane
-# regardless of where the panel sits in the index order. Echoes the resolved
+# Resolve a 1-based agent number to its tmux pane_index. Looks up the pane
+# whose `@yaamux-agent` user-option is `agent-N` — NOT "the Nth pane in
+# pane_index order". In sidebar mode tmux re-numbers panes by visual
+# position, so the Nth-by-index pane is not necessarily agent-N's pane (e.g.
+# with N=4 in sidebar, visual order is 1, 4, 3, 2). The agent name was
+# baked in at launch and is the only stable mapping. Echoes the resolved
 # 0-based tmux pane_index or empty on failure.
 _agent_pane_idx() {
-  local n="${1:-}" raw idx role count=0
+  local n="${1:-}" raw idx role agent
   [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]] && return 1
   tmux has-session -t "$SESSION" 2>/dev/null || return 1
   raw="$(tmux list-panes -t "${SESSION}:agents" \
-    -F '#{pane_index}|#{@yaamux-role}' 2>/dev/null || true)"
-  while IFS='|' read -r idx role; do
+    -F '#{pane_index}|#{@yaamux-role}|#{@yaamux-agent}' 2>/dev/null || true)"
+  while IFS='|' read -r idx role agent; do
     [[ -z "$idx" ]] && continue
     [[ "$role" == "control-panel" ]] && continue
-    count=$((count+1))
-    if [[ "$count" -eq "$n" ]]; then
+    if [[ "$agent" == "agent-${n}" ]]; then
       echo "$idx"
       return 0
     fi
@@ -3067,6 +3069,132 @@ tmux list-panes -t '${sess}:agents' -F '#{pane_index}|#{pane_title}|#{pane_dead}
 }
 
 # =============================================================================
+#  Session configuration — bindings, options, hooks, status line
+# =============================================================================
+# Idempotent: applies all session-level tmux state. Called both at session
+# create AND when attaching to a pre-existing session, so a brew-upgrade
+# (which changes the path baked into `${SELF}`) doesn't leave behind stale
+# `run-shell` bindings pointing at the old binary. Also re-writes the cpanel
+# script + pilot prompt to disk so any later respawn-pane uses current code.
+_apply_session_config() {
+  tmux has-session -t "$SESSION" 2>/dev/null || return 0
+
+  # Fresh assets on disk — picked up by the next respawn of the panel pane
+  # and by --pilot-show.
+  _write_cpanel
+  _write_pilot_prompt
+
+  # Wire delta + bat into the session env if installed. New processes spawned
+  # in any pane inherit these; the user's global gitconfig is untouched.
+  # If the binary isn't present on this run, unset the session var so a stale
+  # value from a previous run (when delta/bat used to exist) doesn't leak
+  # into new shells and break `git`/pager invocations.
+  if command -v delta &>/dev/null; then
+    tmux set-environment    -t "$SESSION" GIT_PAGER "delta --paging=never"
+  else
+    tmux set-environment -u -t "$SESSION" GIT_PAGER 2>/dev/null || true
+  fi
+  if command -v bat &>/dev/null; then
+    tmux set-environment    -t "$SESSION" PAGER "bat --paging=auto"
+  else
+    tmux set-environment -u -t "$SESSION" PAGER 2>/dev/null || true
+  fi
+
+  # Options
+  tmux set-option -g -t "$SESSION" history-limit $SCROLLBACK
+  tmux set-option    -t "$SESSION" prefix C-Space
+  tmux unbind-key    -T prefix C-b
+  tmux bind-key      -T prefix C-Space send-prefix
+  tmux bind-key      -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "pbcopy"
+  tmux bind-key      -T copy-mode    y     send-keys -X copy-pipe-and-cancel "pbcopy"
+  tmux bind-key      -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "pbcopy"
+  tmux bind-key      -T prefix S set-window-option synchronize-panes \; \
+    display-message "sync: #{?synchronize-panes,ON,OFF}"
+  # Pane-health affordances: r restart current, R restart all dead/idle, L clear.
+  tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
+  tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
+    "run-shell -b '${SELF} --restart-dead -y'"
+  tmux bind-key      -T prefix L send-keys C-l \; clear-history
+  # display-popup requires tmux 3.2+; suppress bind failure on older tmux so
+  # session startup still succeeds (the popups just won't be available there;
+  # `yaamux --keys` / `yaamux --connect` still work from any shell).
+  tmux bind-key      -T prefix '?' display-popup -E -w 88 -h 40 \
+    "'${SELF}' --keys | less -R" 2>/dev/null || true
+  tmux bind-key      -T prefix '/' list-keys
+  # Connect info: prefix C → text popup, prefix Q → QR-code popup (if qrencode installed).
+  tmux bind-key      -T prefix C display-popup -E -w '90%' -h '70%' \
+    "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
+  tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
+    "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
+  # Jump to the lazygit `git` window. Only bind G if lazygit is available —
+  # otherwise the `git` window won't have been created.
+  if command -v lazygit &>/dev/null; then
+    tmux bind-key    -T prefix G select-window -t "${SESSION}:git" 2>/dev/null || true
+  fi
+  # Control Panel: prefix p toggles show/hide; remembers via .yaamux/state.
+  tmux bind-key      -T prefix p run-shell -b "${SELF} --toggle-panel"
+  # Pilot mode: prefix P (capital) flips the control panel pane between the
+  # dashboard and a chat-style orchestrator powered by an installed agent CLI.
+  tmux bind-key      -T prefix P run-shell -b "${SELF} --pilot-toggle"
+  # Ergonomic zoom toggle — Ctrl+Space → Space is a one-handed double-tap.
+  tmux bind-key      -T prefix Space resize-pane -Z
+  # prefix 1..9 → jump to the Nth agent pane (skips control-panel).
+  local _k
+  for _k in 1 2 3 4 5 6 7 8 9; do
+    tmux bind-key    -T prefix "$_k" run-shell -b "${SELF} --goto $_k"
+  done
+  tmux set-option    -t "$SESSION" mouse on
+  tmux set-option    -t "$SESSION" monitor-activity on
+  tmux set-option    -t "$SESSION" visual-activity off
+  tmux set-option    -t "$SESSION" pane-border-status top
+  # Health glyph (✓ ⚠ ✗) reads @yaamux-state which the refresher updates.
+  tmux set-option    -t "$SESSION" pane-border-format \
+    " #[bold]#{pane_title}#[nobold] #{?#{==:#{@yaamux-state},dead},#[fg=colour196]✗,#{?#{==:#{@yaamux-state},idle},#[fg=colour220]⚠,#[fg=colour46]✓}} #{?pane_active,#[fg=colour46]●,#[fg=colour238]○} "
+  tmux set-option    -t "$SESSION" status on
+  tmux set-option    -t "$SESSION" status-interval 5
+  tmux set-option    -t "$SESSION" status-style "bg=colour235 fg=white"
+  # Status-left: prefix indicator + session + the active pane's worktree
+  # (basename of pane_current_path) + the branch of that worktree.
+  #
+  # Quoting: `#{b:pane_current_path}` is tmux's native basename modifier —
+  # evaluated by tmux, never reaches a shell, so even a directory name
+  # containing `'` / `"` / `$` / `\\` renders without breaking parsing.
+  # For the git lookup we still need a shell, but we route the path
+  # through `#{q:pane_current_path}` (tmux's quote modifier — escapes
+  # `\\`, `,`, `;`, `'`, `"`, `#`, `$` with backslashes) and embed it in
+  # shell DOUBLE quotes. The combination is safe against arbitrary path
+  # characters: tmux's `\$` becomes a literal `$` inside `"..."`, tmux's
+  # `\"` becomes a literal `"`, and tmux's `\'` is harmless backslash-
+  # apostrophe (no expansion). On the rare path containing those chars
+  # the branch may not resolve, but the `|| echo '—'` keeps the status
+  # line rendering instead of erroring out at parse time.
+  tmux set-option    -t "$SESSION" status-left \
+    "#{?client_prefix,#[fg=colour226 bold]⌨ ,}#[fg=colour46 bold] ◉ ${SESSION} #[fg=white]│ #[fg=colour220]#{b:pane_current_path} #[fg=white]@#[fg=colour39]#(git -C \"#{q:pane_current_path}\" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '—') #[fg=white]│ #[fg=colour226]#{?synchronize-panes,⚡SYNC ,}#[fg=white]"
+  tmux set-option    -t "$SESSION" status-left-length 140
+  # Status-right embeds a per-tick refresh via #(): cheap shell-out to update
+  # @yaamux-state on every status interval. The agent count is derived live
+  # from the session so this stays correct across attach-to-existing.
+  local _n_agents
+  _n_agents="$(tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
+    | grep -cx 'agent' 2>/dev/null || true)"
+  [[ -z "$_n_agents" || "$_n_agents" == "0" ]] && _n_agents="$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  tmux set-option    -t "$SESSION" status-right \
+    "#(${SELF} --refresh-states >/dev/null 2>&1; ${SELF} --status-render)#[fg=colour81]${_n_agents} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+? help"
+  tmux set-option    -t "$SESSION" status-right-length 200
+  tmux set-option    -t "$SESSION" window-status-current-style  "bg=colour27 fg=white bold"
+  tmux set-option    -t "$SESSION" window-status-activity-style "bg=colour130 fg=white bold"
+  tmux set-option    -t "$SESSION" pane-active-border-style "fg=colour46"
+  tmux set-option    -t "$SESSION" pane-border-style "fg=colour238"
+  # Event-driven refresh: when a pane process exits, update immediately and
+  # try to self-heal the control-panel pane if it was the one that exited.
+  tmux set-hook      -t "$SESSION" pane-exited \
+    "run-shell -b '${SELF} --refresh-states >/dev/null 2>&1; ${SELF} --cpanel-self-heal >/dev/null 2>&1'"
+  # Clear the per-pane notification badge when the user focuses a pane.
+  tmux set-hook      -t "$SESSION" pane-focus-in \
+    "run-shell -b \"tmux set-option -p -t '#{pane_id}' @yaamux-notif-pending 0 2>/dev/null || true\""
+}
+
+# =============================================================================
 #  Argument parsing
 # =============================================================================
 # Pre-extract global modifiers (--yolo, --layout, --yes) that combine with
@@ -3871,6 +3999,12 @@ grep -q "# BEGIN yaamux" "${HOME}/.ssh/config" 2>/dev/null || _gen_ssh_config
 # ── tmux session ───────────────────────────────────────────────────────────────
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   warn "Session ${SESSION} already running — attaching."
+  # Re-apply bindings + options + on-disk assets. Crucial after a `brew
+  # upgrade` (or any yaamux update): the previously-baked `${SELF}` in
+  # `run-shell` bindings points at the old binary which may no longer
+  # exist — refreshing them ensures prefix-? / prefix-p / prefix-P / etc.
+  # all hit the current yaamux.
+  _apply_session_config
   _refresh_pane_states
   # If state says panel should be visible but no pane carries the role
   # (manually killed, or older yaamux build), recreate it before attach.
@@ -3900,103 +4034,6 @@ tmux set-option -t "$SESSION" @yaamux-repo "$REPO_ROOT"
 tmux set-option -t "$SESSION" @yaamux-shells \
   "zsh bash sh fish dash ash $(basename "${SHELL:-zsh}" 2>/dev/null || echo zsh)"
 
-# Wire delta + bat into the session env if installed. New processes spawned
-# in any pane inherit these; the user's global gitconfig is untouched.
-# (lazygit ignores GIT_PAGER — its delta wiring is via the repo-local config
-# written below when the `git` window is created.)
-command -v delta &>/dev/null && \
-  tmux set-environment -t "$SESSION" GIT_PAGER "delta --paging=never"
-command -v bat &>/dev/null && \
-  tmux set-environment -t "$SESSION" PAGER "bat --paging=auto"
-
-# Options
-tmux set-option -g -t "$SESSION" history-limit $SCROLLBACK
-tmux set-option    -t "$SESSION" prefix C-Space
-tmux unbind-key    -T prefix C-b
-tmux bind-key      -T prefix C-Space send-prefix
-tmux bind-key      -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "pbcopy"
-tmux bind-key      -T copy-mode    y     send-keys -X copy-pipe-and-cancel "pbcopy"
-tmux bind-key      -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "pbcopy"
-tmux bind-key      -T prefix S set-window-option synchronize-panes \; \
-  display-message "sync: #{?synchronize-panes,ON,OFF}"
-# Pane-health affordances: r restart current, R restart all dead/idle, L clear.
-tmux bind-key      -T prefix r run-shell -b "${SELF} --restart-current"
-tmux bind-key      -T prefix R confirm-before -p "restart all dead/idle agents? (y/n) " \
-  "run-shell -b '${SELF} --restart-dead -y'"
-tmux bind-key      -T prefix L send-keys C-l \; clear-history
-# display-popup requires tmux 3.2+; suppress bind failure on older tmux so
-# session startup still succeeds (the popups just won't be available there;
-# `yaamux --keys` / `yaamux --connect` still work from any shell).
-tmux bind-key      -T prefix '?' display-popup -E -w 88 -h 40 \
-  "'${SELF}' --keys | less -R" 2>/dev/null || true
-tmux bind-key      -T prefix '/' list-keys
-# Connect info: prefix C → text popup, prefix Q → QR-code popup (if qrencode installed).
-# `read` keeps the popup open until the user dismisses with Enter.
-tmux bind-key      -T prefix C display-popup -E -w '90%' -h '70%' \
-  "'${SELF}' --connect; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
-tmux bind-key      -T prefix Q display-popup -E -w '70%' -h '90%' \
-  "'${SELF}' --connect --qr; printf '\\n  (press Enter to close)'; read -r _" 2>/dev/null || true
-# Jump to the lazygit `git` window. Silent no-op if lazygit isn't installed
-# (the window doesn't exist).
-# Only bind G if lazygit is available — otherwise the `git` window won't have
-# been created, and pressing G would show "can't find window: git" in tmux.
-if command -v lazygit &>/dev/null; then
-  tmux bind-key    -T prefix G select-window -t "${SESSION}:git" 2>/dev/null || true
-fi
-# Control Panel: prefix p toggles show/hide; remembers via .yaamux/state.
-tmux bind-key      -T prefix p run-shell -b "${SELF} --toggle-panel"
-# Pilot mode: prefix P (capital) flips the control panel pane between the
-# dashboard and a chat-style orchestrator powered by an installed agent CLI
-# (claude / opencode / gemini / codex / copilot — first installed wins).
-tmux bind-key      -T prefix P run-shell -b "${SELF} --pilot-toggle"
-# Ergonomic zoom toggle — Ctrl+Space → Space is a one-handed double-tap.
-# tmux's idiomatic `prefix Z` keeps working alongside this.
-tmux bind-key      -T prefix Space resize-pane -Z
-# prefix 1..9 → jump straight to the Nth agent pane (skips control-panel).
-# Resolved via --goto N → _agent_pane_idx → select-pane.
-tmux bind-key      -T prefix 1 run-shell -b "${SELF} --goto 1"
-tmux bind-key      -T prefix 2 run-shell -b "${SELF} --goto 2"
-tmux bind-key      -T prefix 3 run-shell -b "${SELF} --goto 3"
-tmux bind-key      -T prefix 4 run-shell -b "${SELF} --goto 4"
-tmux bind-key      -T prefix 5 run-shell -b "${SELF} --goto 5"
-tmux bind-key      -T prefix 6 run-shell -b "${SELF} --goto 6"
-tmux bind-key      -T prefix 7 run-shell -b "${SELF} --goto 7"
-tmux bind-key      -T prefix 8 run-shell -b "${SELF} --goto 8"
-tmux bind-key      -T prefix 9 run-shell -b "${SELF} --goto 9"
-tmux set-option    -t "$SESSION" mouse on
-tmux set-option    -t "$SESSION" monitor-activity on
-tmux set-option    -t "$SESSION" visual-activity off
-tmux set-option    -t "$SESSION" pane-border-status top
-# Health glyph (✓ ⚠ ✗) reads @yaamux-state which the refresher updates.
-tmux set-option    -t "$SESSION" pane-border-format \
-  " #[bold]#{pane_title}#[nobold] #{?#{==:#{@yaamux-state},dead},#[fg=colour196]✗,#{?#{==:#{@yaamux-state},idle},#[fg=colour220]⚠,#[fg=colour46]✓}} #{?pane_active,#[fg=colour46]●,#[fg=colour238]○} "
-tmux set-option    -t "$SESSION" status on
-tmux set-option    -t "$SESSION" status-interval 5
-tmux set-option    -t "$SESSION" status-style "bg=colour235 fg=white"
-tmux set-option    -t "$SESSION" status-left \
-  "#{?client_prefix,#[fg=colour226 bold]⌨ ,}#[fg=colour46 bold] ◉ ${SESSION} #[fg=white]│ #[fg=colour39] #(git -C '${REPO_ROOT}' rev-parse --abbrev-ref HEAD 2>/dev/null || echo '—') #[fg=white]│ #[fg=colour226]#{?synchronize-panes,⚡SYNC ,}#[fg=white]"
-tmux set-option    -t "$SESSION" status-left-length 120
-# Status-right embeds a per-tick refresh via #(): cheap shell-out to update
-# @yaamux-state on every status interval. The text after the refresh is the
-# per-pane attention chips (--status-render), agent count, clock, and a hint.
-tmux set-option    -t "$SESSION" status-right \
-  "#(${SELF} --refresh-states >/dev/null 2>&1; ${SELF} --status-render)#[fg=colour81]${N} agents #[fg=white]│ #[fg=colour226]%H:%M #[fg=white]│ C-Space+? help"
-# Wider status-right so the per-pane chips don't clip on bigger panes counts.
-tmux set-option    -t "$SESSION" status-right-length 200
-tmux set-option    -t "$SESSION" window-status-current-style  "bg=colour27 fg=white bold"
-tmux set-option    -t "$SESSION" window-status-activity-style "bg=colour130 fg=white bold"
-tmux set-option    -t "$SESSION" pane-active-border-style "fg=colour46"
-tmux set-option    -t "$SESSION" pane-border-style "fg=colour238"
-# Event-driven refresh too — when a pane process exits, update immediately
-# rather than waiting for the next status tick. Also try to self-heal the
-# control-panel pane if it was the one that exited.
-tmux set-hook      -t "$SESSION" pane-exited \
-  "run-shell -b '${SELF} --refresh-states >/dev/null 2>&1; ${SELF} --cpanel-self-heal >/dev/null 2>&1'"
-# Clear the per-pane notification badge when the user focuses a pane — the
-# bottom indicator is "attention pending", focus is acknowledgement.
-tmux set-hook      -t "$SESSION" pane-focus-in \
-  "run-shell -b \"tmux set-option -p -t '#{pane_id}' @yaamux-notif-pending 0 2>/dev/null || true\""
-
 # Decide the effective panel-layout mode. Auto = parity-based: even-N gets a
 # right-column sidebar so the agent grid stays balanced; odd-N gets one more
 # tile. Small terminals (cols < YAAMUX_CPANEL_MIN_COLS) fall back to tile.
@@ -4015,47 +4052,63 @@ if [[ "$CONTROL_PANEL_VISIBLE" == "true" ]]; then
 fi
 
 # Build N agent panes + (optionally) the control-panel pane.
-# AGENT_PANE_IDX maps the 1-based agent number (i+1) → tmux pane index. In
-# tile/no-panel mode this is just 0..N-1; in sidebar mode the panel takes
-# index 1, so agents land at 0, 2, 3, ..., N.
+#
+# We track panes by their tmux pane_id (e.g. `%23`), NOT pane_index. Reason:
+# in sidebar mode, after the panel is split off to the right, each subsequent
+# `split-window -t agents.0` causes tmux to re-number panes by visual
+# position — the panel keeps getting pushed to a higher index. An index-based
+# AGENT_PANE_IDX would then point at the wrong panes, and the agent launch
+# loop would clobber the panel's @yaamux-role with "agent" (which is exactly
+# the bug that hid the Control Panel pane on `yaamux 4` in v0.4.0). pane_id
+# is assigned at pane creation and never changes; safe to use as the target.
 LAYOUT="$(_layout_for "$N" "$YAAMUX_LAYOUT")"
-AGENT_PANE_IDX=()
+AGENT_PANE_IDS=()
+PANEL_PANE_ID=""
+
+# The first agent reuses the pane created by `new-session` above.
+AGENT_PANE_IDS[0]="$(tmux list-panes -t "${SESSION}:agents" \
+  -F '#{pane_id}' | head -1)"
 
 if [[ "$EFFECTIVE_PANEL_MODE" == "sidebar" ]]; then
-  # Split the right 30% off before adding more agents — preserves the column.
-  tmux split-window -h -p 30 -t "${SESSION}:agents" -c "$REPO_ROOT"
-  tmux set-option -p -t "${SESSION}:agents.1" @yaamux-role control-panel
-  tmux set-option -p -t "${SESSION}:agents.1" @yaamux-type panel
-  tmux set-option -p -t "${SESSION}:agents.1" @yaamux-state panel
-  tmux select-pane -t "${SESSION}:agents.1" -T "🎛  control-panel"
-  AGENT_PANE_IDX[0]=0
-  # Subsequent splits target pane 0 (the left agent area) so the sidebar
-  # column at index 1 stays intact. Each new split appends index 2, 3, ...
+  # Split the right 30% off; capture pane_id so the panel pane survives the
+  # renumbering that happens when subsequent splits target agents.0.
+  PANEL_PANE_ID="$(tmux split-window -h -p 30 -t "${SESSION}:agents" \
+    -c "$REPO_ROOT" -P -F '#{pane_id}')"
+  tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-role  control-panel
+  tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-type  panel
+  tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-state panel
+  tmux select-pane -t "$PANEL_PANE_ID" -T "🎛  control-panel"
+  # Each new agent splits the PREVIOUS agent's pane (not always agents[0])
+  # so the result is a clean top-to-bottom cascade in the left column —
+  # agent-1, agent-2, agent-3, … — matching what the user sees in the
+  # cpanel and what `prefix 1..9` jumps to. Targeting AGENT_PANE_IDS[0]
+  # instead would make every new pane appear right below the first,
+  # producing reversed visual order (agent-1, agent-N, …, agent-2).
   for ((i=1; i<N; i++)); do
-    tmux split-window -t "${SESSION}:agents.0" -c "${WORKTREES_BASE}/agent-$((i+1))"
-    AGENT_PANE_IDX[i]=$((i+1))
+    AGENT_PANE_IDS[i]="$(tmux split-window -t "${AGENT_PANE_IDS[$((i-1))]}" \
+      -c "${WORKTREES_BASE}/agent-$((i+1))" -P -F '#{pane_id}')"
   done
   # No select-layout — the manual sidebar split must survive. tmux preserves
   # this when no named layout is applied.
 else
-  # Tile mode (also no-panel mode): existing behavior unchanged.
-  AGENT_PANE_IDX[0]=0
+  # Tile / no-panel mode: pane indices ARE stable here because we're only
+  # ever splitting the window (no positional renumbering target), but we
+  # still track pane_id for consistency with the sidebar path.
   for ((i=1; i<N; i++)); do
-    tmux split-window -t "${SESSION}:agents" -c "${WORKTREES_BASE}/agent-$((i+1))"
+    AGENT_PANE_IDS[i]="$(tmux split-window -t "${SESSION}:agents" \
+      -c "${WORKTREES_BASE}/agent-$((i+1))" -P -F '#{pane_id}')"
     tmux select-layout -t "${SESSION}:agents" "$LAYOUT"
-    AGENT_PANE_IDX[i]=$i
   done
   tmux select-layout -t "${SESSION}:agents" "$LAYOUT"
 
   if [[ "$EFFECTIVE_PANEL_MODE" == "tile" ]]; then
-    # Add the panel as one more tile. Re-tile to re-balance.
-    tmux split-window -t "${SESSION}:agents" -c "$REPO_ROOT"
-    PANEL_IDX="$(tmux display-message -p -t "${SESSION}:agents" '#{window_panes}')"
-    PANEL_IDX=$((PANEL_IDX - 1))
-    tmux set-option -p -t "${SESSION}:agents.${PANEL_IDX}" @yaamux-role control-panel
-    tmux set-option -p -t "${SESSION}:agents.${PANEL_IDX}" @yaamux-type panel
-    tmux set-option -p -t "${SESSION}:agents.${PANEL_IDX}" @yaamux-state panel
-    tmux select-pane -t "${SESSION}:agents.${PANEL_IDX}" -T "🎛  control-panel"
+    # Add the panel as one more tile, then re-tile to re-balance.
+    PANEL_PANE_ID="$(tmux split-window -t "${SESSION}:agents" \
+      -c "$REPO_ROOT" -P -F '#{pane_id}')"
+    tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-role  control-panel
+    tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-type  panel
+    tmux set-option -p -t "$PANEL_PANE_ID" @yaamux-state panel
+    tmux select-pane -t "$PANEL_PANE_ID" -T "🎛  control-panel"
     tmux select-layout -t "${SESSION}:agents" tiled
   fi
 fi
@@ -4130,39 +4183,43 @@ tmux set-environment -t "$SESSION" YAAMUX_AGENT_TOTAL "${#AGENTS[@]}"
 for i in "${!AGENTS[@]}"; do
   agent="${AGENTS[$i]}"; type="${AGENT_TYPES[$i]}"
   LOG_FILE="${LOG_DIR}/${agent}.log"
-  # AGENT_PANE_IDX maps the agent ordinal to its tmux pane index — same in
-  # tile mode (i==idx), shifted in sidebar mode where the panel takes idx 1.
-  apidx="${AGENT_PANE_IDX[$i]:-$i}"
-  tmux select-pane -t "${SESSION}:agents.${apidx}" -T "$(agent_icon "$type") ${agent} · ${type}"
-  tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-role  "agent"
-  tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-agent "$agent"
-  tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-type  "$type"
-  tmux set-option  -p -t "${SESSION}:agents.${apidx}" @yaamux-state "running"
-  tmux pipe-pane   -t "${SESSION}:agents.${apidx}" -o "cat >> ${LOG_FILE}"
-  # Resolve the actual pane id so the agent's shell can quote itself in logs /
-  # send-keys to siblings. display-message reads the target pane's #{pane_id}.
-  apid="$(tmux display-message -p -t "${SESSION}:agents.${apidx}" '#{pane_id}' 2>/dev/null || echo '')"
+  # Target by stable pane_id (e.g. `%23`) — tmux re-numbers pane_index by
+  # visual position in sidebar mode after each split, so an index captured
+  # earlier in this script would no longer point at the right pane.
+  apid="${AGENT_PANE_IDS[$i]}"
+  tmux select-pane -t "$apid" -T "$(agent_icon "$type") ${agent} · ${type}"
+  tmux set-option  -p -t "$apid" @yaamux-role  "agent"
+  tmux set-option  -p -t "$apid" @yaamux-agent "$agent"
+  tmux set-option  -p -t "$apid" @yaamux-type  "$type"
+  tmux set-option  -p -t "$apid" @yaamux-state "running"
+  tmux pipe-pane   -t "$apid" -o "cat >> ${LOG_FILE}"
   # Export YAAMUX_* into the pane's shell, then launch the agent. The exports
   # land in the live shell (so a Ctrl-C + manual relaunch still sees them) and,
   # together with the session-level set-environment above, cover both the
   # "current shell" and "new shell in this session" cases.
   agent_invocation="$(agent_cmd "$type" "$agent")"
-  tmux send-keys -t "${SESSION}:agents.${apidx}" \
+  tmux send-keys -t "$apid" \
     "export YAAMUX_AGENT_NAME='${agent}' YAAMUX_AGENT_NUMBER=$((i+1)) YAAMUX_AGENT_TOTAL=${#AGENTS[@]} YAAMUX_AGENT_TYPE='${type}' YAAMUX_SESSION='${SESSION}' YAAMUX_PANE_ID='${apid}' YAAMUX_REPO_ROOT='${REPO_ROOT}' YAAMUX_VERSION='${YAAMUX_VERSION_STR}' YAAMUX_AGENT_MODE=safe; clear; ${agent_invocation}" Enter
   tmux select-pane -t "${SESSION}:logs.${i}" -T "📋 ${agent}"
   tmux send-keys   -t "${SESSION}:logs.${i}" \
     "tail -f ${LOG_FILE} 2>/dev/null || { sleep 2; exec tail -f ${LOG_FILE}; }" Enter
 done
 
-# Launch the Control Panel TUI in the panel pane (if visible).
-if [[ "$EFFECTIVE_PANEL_MODE" == "sidebar" || "$EFFECTIVE_PANEL_MODE" == "tile" ]]; then
+# Launch the Control Panel TUI in the panel pane (if visible). Target by
+# the captured pane_id so we hit the right pane regardless of how tmux has
+# re-numbered indices during the splits above.
+if [[ -n "$PANEL_PANE_ID" ]]; then
   _write_cpanel
-  PANEL_IDX="$(_panel_pane_idx)"
-  if [[ -n "$PANEL_IDX" ]]; then
-    tmux send-keys -t "${SESSION}:agents.${PANEL_IDX}" \
-      "clear; YAAMUX_SELF='${SELF}' YAAMUX_SESSION='${SESSION}' YAAMUX_NOTIF_LOG='${NOTIF_LOG}' '${CPANEL_SCRIPT}'" Enter
-  fi
+  tmux send-keys -t "$PANEL_PANE_ID" \
+    "clear; YAAMUX_SELF='${SELF}' YAAMUX_SESSION='${SESSION}' YAAMUX_NOTIF_LOG='${NOTIF_LOG}' '${CPANEL_SCRIPT}'" Enter
 fi
+
+# Apply all session-level options, bindings, hooks, and on-disk assets.
+# Called AFTER agent launches so the live "N agents" count baked into
+# status-right is correct. Same function is also called by the attach-
+# to-existing branch above so a brew upgrade never leaves bindings
+# pointing at the prior `${SELF}` path.
+_apply_session_config
 
 # remote-control server (Claude)
 if $HAS_CLAUDE; then
