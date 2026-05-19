@@ -640,8 +640,8 @@ tmux select-pane   -t "${MOB}:agents.${PANE_INDEX}" 2>/dev/null || true
 tmux resize-pane   -t "${MOB}:agents.${PANE_INDEX}" -Z 2>/dev/null || true
 tmux set-option -t "$MOB" prefix C-Space
 tmux set-option -t "$MOB" status-left  "#[fg=colour46,bold] 📱 agent-$((PANE_INDEX+1)) "
-tmux set-option -t "$MOB" status-right "#[fg=colour226]C connect · Q QR · D detach"
-echo "📱  ${SESSION} · agent-$((PANE_INDEX+1)) — detach: Ctrl+Space + D"
+tmux set-option -t "$MOB" status-right "#[fg=colour226]C connect · Q QR · d detach"
+echo "📱  ${SESSION} · agent-$((PANE_INDEX+1)) — detach: Ctrl+Space + d"
 trap "tmux kill-session -t '$MOB' 2>/dev/null || true" EXIT
 tmux attach -t "$MOB"
 MOBILE_EOF
@@ -2595,7 +2595,7 @@ In-session keys (press Ctrl+Space, then the key):
   arrows       move between panes
   Space        zoom / unzoom current pane (ergonomic alias for Z)
   Z            zoom / unzoom current pane
-  W            window list (agents / remote-srv / logs)
+  W            window list (agents / git / remote-srv / logs)
   S            toggle sync mode (broadcast input to all panes)
   [            enter scroll mode  (q exits, / searches)
    ↳ y, Enter  (in scroll mode) copy selection → system clipboard
@@ -2605,7 +2605,7 @@ In-session keys (press Ctrl+Space, then the key):
   p            toggle Control Panel pane (shows/hides; remembers)
   P            flip the Control Panel pane between dashboard and pilot chat
   1-9          jump to agent pane N (skips control-panel)
-  D            detach (agents keep running)
+  d            detach (agents keep running) — tmux default
   C            connect-commands popup (mosh / ssh / --remote lines)
   Q            QR-code popup — scan with iOS Camera → opens mosh:// in Blink / Prompt
   G            jump to the `git` window (lazygit · worktrees · branches · PRs)
@@ -3474,9 +3474,9 @@ case "${1:-}" in
     tmux set-option -t "$_mg_umbrella" prefix C-Space
     tmux set-option -t "$_mg_umbrella" mouse on
     tmux set-option -t "$_mg_umbrella" status-left  "#[fg=colour46,bold] grid "
-    tmux set-option -t "$_mg_umbrella" status-right "#[fg=colour226]Ctrl+Space n/p · C connect · Q QR · D detach"
+    tmux set-option -t "$_mg_umbrella" status-right "#[fg=colour226]Ctrl+Space n/p · C connect · Q QR · d detach"
     tmux select-window -t "${_mg_umbrella}:^"
-    log "yaamux grid — ${_mg_linked} repo(s) · Ctrl+Space n/p swipes · D detaches"
+    log "yaamux grid — ${_mg_linked} repo(s) · Ctrl+Space n/p swipes · d detaches"
     exec tmux attach -t "$_mg_umbrella" ;;
 
   --kill)
@@ -4197,7 +4197,7 @@ fi
 $HAS_CLAUDE && echo -e "   claude.ai/code — Claude panes (browser / iOS app)"
 echo ""
 echo -e " ${CYAN}Manage:${NC}  yaamux --send N \"x\" · --broadcast \"x\" · --restart N · --vscode N · --logs · --connect [--qr]"
-echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · D detach · ${BOLD}C connect${NC} · ${BOLD}Q QR${NC} · ${BOLD}P pilot${NC}"
+echo -e " ${CYAN}Prefix:${NC}  Ctrl+Space → arrows · Z zoom · [ scroll · y copy · S sync · d detach · ${BOLD}C connect${NC} · ${BOLD}Q QR${NC} · ${BOLD}P pilot${NC} · ${BOLD}G git${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
