@@ -34,7 +34,8 @@ When you are in a session, the following env vars describe your position:
 | `YAAMUX_PANE_ID`      | tmux pane id (e.g. `%23`) |
 | `YAAMUX_REPO_ROOT`    | absolute path of the main checkout |
 | `YAAMUX_VERSION`      | yaamux version string |
-| `YAAMUX_AGENT_MODE`   | `safe` — destructive flags are refused |
+| `YAAMUX_AGENT_MODE`   | `safe` while you are an agent · `pilot` inside the orchestrator pane · destructive flags refused while `safe` |
+| `YAAMUX_PILOT_ACTIVE` | backend name (e.g. `claude`) if a pilot is driving this session — unset when the panel is in dashboard mode |
 
 Sibling agents live in worktrees `agent-1` … `agent-${YAAMUX_AGENT_TOTAL}`
 next to the parent of `YAAMUX_REPO_ROOT`. Your own pwd is your worktree.
@@ -73,8 +74,15 @@ yaamux --bg-tail ci                         # read so-far, learn OFFSET
 yaamux --bg-tail ci --from 12345            # resume from where you left off
 ```
 
+Stop a panel before it finishes (e.g. a runaway dev-server):
+
+```bash
+yaamux --bg-kill ci                         # Ctrl-C, then tmux kill-pane if still alive
+```
+
 Status values: `running` · `done` (rc=0) · `failed` (rc≠0) · `killed`
-(SIGINT, rc=130) · `unknown`.
+(SIGINT, rc=130) · `unknown`. The log is preserved on disk after a kill,
+so `--bg-tail` still works after the panel ends.
 
 ### Hand work to a sibling agent
 
@@ -133,8 +141,24 @@ yaamux --pr "$YAAMUX_AGENT_NUMBER" "feat: ship the new auth flow"
 yaamux --pr "$YAAMUX_AGENT_NUMBER" "..." --merge
 ```
 
-This pushes your branch (`worktree/<your-agent-name>`) and runs
-`gh pr create` against the repo's default base.
+This pushes your branch (`worktree/<your-agent-name>`) and opens a PR via
+the auto-detected forge CLI (`gh` / `glab` / `tea` — overridable with
+`$YAAMUX_FORGE`).
+
+### After the PR is open — CI + diff helpers
+
+```bash
+yaamux --watch-pr   "$YAAMUX_AGENT_NUMBER"   # block until CI completes (pass / fail)
+yaamux --auto-merge "$YAAMUX_AGENT_NUMBER"   # enable auto-merge (squash) on the existing PR
+yaamux --ci-status                           # table of CI status across every pane's PR
+yaamux --ci-status  "$YAAMUX_AGENT_NUMBER"   # just one pane's CI status
+yaamux --diff       "$YAAMUX_AGENT_NUMBER"   # diff your branch vs origin/main (delta-highlighted)
+```
+
+`--watch-pr` is the right call when you've kicked off a PR and want to
+block until checks complete before doing follow-up work. Don't poll
+`--ci-status` in a loop — `--watch-pr` already wraps `gh pr checks --watch`
+properly.
 
 ## Do not run these
 
@@ -147,6 +171,13 @@ flags so a curious agent cannot tear down its own session:
 
 If you genuinely need one of these to run, ask the operator (the human
 who started yaamux) to run it from their own shell outside the session.
+
+Operator-surface flags you don't need to invoke yourself (they're for
+the human who runs yaamux): `--init`, `--add-docs`, `--update`,
+`--prepare-host`, `--setup-notify`, `--ssh-config`, `--connect`,
+`--auto-attach`, `--mobile-attach`, `--mobile-grid`, `--remote`,
+`--remote-hosts`, `--toggle-panel`, `--panel-show` / `--panel-hide`,
+`--pilot-toggle` / `--pilot-show` / `--pilot-hide` / `--pilot-backend`.
 
 ## Reference
 

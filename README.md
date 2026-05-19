@@ -493,6 +493,7 @@ Run `ymx --keys` from any shell for the same cheat sheet — no tmux needed.
 | `ymx --auto-attach`                                 | Attach with UI picked by terminal width                              |
 | `ymx --mobile-attach [repo] [pane]` / `--mobile-grid` | iPhone (one pane zoomed) / iPad (umbrella session)                 |
 | `ymx --connect [--qr]`                              | Print exact mosh/ssh/`--remote` lines (optional QR)                  |
+| `ymx --prepare-host [--check]`                      | One-time: symlink `mosh-server` into `/usr/local/bin` so iOS clients opening the QR'd `mosh://` URL find it (macOS Homebrew hosts) |
 | **Self-management**                                 |                                                                      |
 | `ymx --version` / `--keys` / `--help`               | Version / cheat-sheet / inline help                                  |
 | `ymx --install` / `--update` / `--uninstall`        | Manage the symlink under `~/.local/bin`                              |
