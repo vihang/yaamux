@@ -59,11 +59,11 @@ multiple repos simultaneously without collision.
 |---------|--------|
 | `yaamux [N] [types...]` | Start (or attach if the repo's session exists) |
 | `--init [--with-docs]` | Scaffold AGENTS.md + `.yaamux/config` + `.worktreeinclude` |
-| `--list [--json]` | List yaamux sessions across all repos |
-| `--attach` | Re-attach to this repo's session |
-| `--kill` | Stop the session (worktrees kept) |
+| `--list [--json]` | List yaamux sessions across all repos — shows pane health (R/I/D), last activity, `*` on current repo |
+| `--attach [<name>]` | Re-attach (no arg = this repo's session; `<name>` targets another session — warns when cross-repo) |
+| `--kill [<name>]` | Stop a session, worktrees kept (no arg = this repo; `<name>` targets another — warns when cross-repo) |
 | `--clean` [`--force`] | Remove clean worktrees; `--force` removes dirty ones too |
-| `--status` | Health check: session, panes, worktrees, notifications |
+| `--status [<name>]` | Health check (no arg = this repo: session, panes, worktrees, notifications; with `<name>` = panes only for that session) |
 | `--layout main\|tiled\|even` | Override the auto-picked pane layout |
 | `--zoom N` | Attach with pane N zoomed full-screen |
 | `--vscode N` | Hand pane N's session to VS Code for interactive dev |
@@ -121,20 +121,28 @@ without a major version bump.** Integrations can depend on it.
 ```json
 [
   {
-    "session": "yaamux-myapp",
-    "agents":  4,
+    "index":    1,
+    "session":  "yaamux-myapp",
+    "agents":   4,
     "attached": true,
-    "repo":    "/Users/vihang/Code/myapp"
+    "repo":     "/Users/vihang/Code/myapp",
+    "health":   { "running": 3, "idle": 1, "dead": 0 },
+    "last_activity_seconds": 142,
+    "current_repo": true
   }
 ]
 ```
 
 | Key | Type | Notes |
 |-----|------|-------|
+| `index`   | int    | 1-based row number matching the human `--list` table. Informational — actions take session names, not indices. |
 | `session` | string | Full tmux session name (`yaamux-<project>`); use as `-t <session>` target |
 | `agents`  | int    | Count of `@yaamux-role=agent` panes in the `agents` window. Excludes the Control Panel pane. Falls back to total pane count for pre-v0.2 sessions that lack the role tag. |
 | `attached` | bool  | `true` iff at least one tmux client is currently attached to this session |
 | `repo`     | string | Absolute path to the repo root, read from the session's `@yaamux-repo` user-option |
+| `health`   | obj    | Per-pane state breakdown: `running` (foreground process not a shell), `idle` (shell prompt only — agent exited), `dead` (tmux pane process terminated). Sum + control-panel pane = total panes in the window. |
+| `last_activity_seconds` | int | Seconds since the session saw any pane activity (tmux's `session_activity`). 0 = currently active. |
+| `current_repo` | bool | `true` iff this session's `repo` matches the cwd's repo root — the same row marked `*` in the human table. |
 
 Empty result is the literal string `[]`. Exit code is `0` in both cases —
 "no sessions" is not an error.
