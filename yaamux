@@ -1879,27 +1879,95 @@ _diff_pane() {
 
 _list_sessions() {
   local format="${1:-human}"
-  local sessions
-  sessions="$(tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_windows}' 2>/dev/null | grep '^yaamux-' || true)"
+  local sessions now use_color=false
+  now="$(date +%s)"
+  [[ -t 1 ]] && use_color=true
+  # Sorted by name so the `#` column is stable across invocations. Also includes
+  # session_activity (epoch ms on tmux 3.x, seconds on older) for the LAST column.
+  sessions="$(tmux list-sessions -F '#{session_name}|#{session_attached}|#{session_activity}' 2>/dev/null | grep '^yaamux-' | sort || true)"
   if [[ -z "$sessions" ]]; then
     [[ "$format" == "json" ]] && echo "[]" || log "No yaamux sessions running."
     return
   fi
+
+  # Per-session health: classify each pane in the `agents` window into
+  # running / idle / dead / panel, the same way _pane_state does — but inline
+  # so we don't depend on the global $SESSION the function reads.
+  # Writes results into _ls_running / _ls_idle / _ls_dead / _ls_panel / _ls_agents.
+  _ls_classify_panes() {
+    local sess="$1" shells panes pd pc pr s is_shell
+    shells="$(tmux show-option -v -t "$sess" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
+    panes="$(tmux list-panes -t "${sess}:agents" -F '#{pane_dead}|#{pane_current_command}|#{@yaamux-role}' 2>/dev/null || true)"
+    _ls_running=0; _ls_idle=0; _ls_dead=0; _ls_panel=0
+    while IFS='|' read -r pd pc pr; do
+      [[ -z "${pd}${pc}${pr}" ]] && continue
+      if [[ "$pr" == "control-panel" ]]; then
+        _ls_panel=$((_ls_panel+1))
+      elif [[ "$pd" == "1" ]]; then
+        _ls_dead=$((_ls_dead+1))
+      else
+        is_shell=false
+        for s in $shells; do [[ "$pc" == "$s" ]] && { is_shell=true; break; }; done
+        if $is_shell; then _ls_idle=$((_ls_idle+1)); else _ls_running=$((_ls_running+1)); fi
+      fi
+    done <<< "$panes"
+    _ls_agents=$((_ls_running+_ls_idle+_ls_dead))
+    # Pre-v0.2 sessions had no @yaamux-role tag — fall back to total pane count.
+    if [[ "$_ls_agents" -eq 0 && "$_ls_panel" -eq 0 ]]; then
+      _ls_agents="$(tmux list-panes -t "${sess}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+    fi
+  }
+
+  _ls_fmt_age() {
+    local age=$1
+    (( age < 0 )) && age=0
+    if   (( age < 60    )); then printf '%ds' "$age"
+    elif (( age < 3600  )); then printf '%dm' $((age/60))
+    elif (( age < 86400 )); then printf '%dh' $((age/3600))
+    else                         printf '%dd' $((age/86400))
+    fi
+  }
+
+  # Compact health badge: "3R 1I 1D". Color-coded when stdout is a TTY.
+  # Returns plain on stderr / pipe so widths stay sane in captures.
+  _ls_fmt_health() {
+    local r=$1 i=$2 d=$3 parts=()
+    if $use_color; then
+      (( r > 0 )) && parts+=("$(printf '\033[32m%dR\033[0m' "$r")")
+      (( i > 0 )) && parts+=("$(printf '\033[2m%dI\033[0m'  "$i")")
+      (( d > 0 )) && parts+=("$(printf '\033[31m%dD\033[0m' "$d")")
+    else
+      (( r > 0 )) && parts+=("${r}R")
+      (( i > 0 )) && parts+=("${i}I")
+      (( d > 0 )) && parts+=("${d}D")
+    fi
+    (( ${#parts[@]} == 0 )) && { printf -- '—'; return; }
+    (IFS=' '; printf '%s' "${parts[*]}")
+  }
+
+  # Pad an ANSI-colored string to N visible characters (right-pad with spaces),
+  # so column layouts survive escape bytes.
+  _ls_pad_ansi() {
+    local s="$1" want="$2" plain
+    plain="$(printf '%s' "$s" | sed $'s/\x1b\\[[0-9;]*m//g')"
+    local pad=$((want - ${#plain}))
+    (( pad < 0 )) && pad=0
+    printf '%s%*s' "$s" "$pad" ""
+  }
+
   if [[ "$format" == "json" ]]; then
     # Build TSV in bash; pipe through python for safe JSON escaping.
-    local tsv="" name attached _w repo agents att
-    while IFS='|' read -r name attached _w; do
+    local tsv="" name attached activity repo att sec age current i=1
+    while IFS='|' read -r name attached activity; do
       [[ -z "$name" ]] && continue
       repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '')"
-      # Count only @yaamux-role=agent panes; older sessions without the
-      # marker fall back to total pane count (panel role wasn't a thing).
-      # `grep -c` prints 0 even on no matches — `|| true` (not `|| echo 0`)
-      # avoids emitting a second "0" that would later break `[[ -eq ]]`.
-      agents="$(tmux list-panes -t "${name}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-        | grep -cx 'agent' 2>/dev/null || true)"
-      [[ -z "$agents" || "$agents" == "0" ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+      _ls_classify_panes "$name"
+      sec="$activity"; [[ "${#sec}" -ge 13 ]] && sec=$((sec/1000))
+      age=$((now - sec)); (( age < 0 )) && age=0
       att="false"; [[ "$attached" -gt 0 ]] && att="true"
-      tsv+="${name}	${agents:-0}	${att}	${repo}"$'\n'
+      current="false"; [[ -n "$repo" && "$repo" == "$REPO_ROOT" ]] && current="true"
+      tsv+="${i}	${name}	${_ls_agents}	${att}	${repo}	${_ls_running}	${_ls_idle}	${_ls_dead}	${age}	${current}"$'\n'
+      i=$((i+1))
     done <<< "$sessions"
     printf '%s' "$tsv" | python3 -c '
 import json, sys
@@ -1907,24 +1975,74 @@ items = []
 for line in sys.stdin.read().splitlines():
     if not line: continue
     parts = line.split("\t")
-    if len(parts) < 4: continue
-    items.append({"session": parts[0], "agents": int(parts[1]),
-                  "attached": parts[2] == "true", "repo": parts[3]})
+    if len(parts) < 10: continue
+    items.append({
+        "index": int(parts[0]), "session": parts[1], "agents": int(parts[2]),
+        "attached": parts[3] == "true", "repo": parts[4],
+        "health": {"running": int(parts[5]), "idle": int(parts[6]), "dead": int(parts[7])},
+        "last_activity_seconds": int(parts[8]),
+        "current_repo": parts[9] == "true",
+    })
 print(json.dumps(items, indent=2))
 '
   else
-    printf "%-30s %-8s %-10s %s\n" "SESSION" "AGENTS" "ATTACHED" "REPO"
-    local name attached _w repo agents att_str
-    while IFS='|' read -r name attached _w; do
+    echo "yaamux sessions (* = current repo):"
+    echo ""
+    printf "   %-3s %-30s %-7s %-13s %-5s %s\n" "#" "SESSION" "AGENTS" "HEALTH" "LAST" "REPO"
+    local name attached activity repo att_str sec age health marker i=1
+    while IFS='|' read -r name attached activity; do
       [[ -z "$name" ]] && continue
       repo="$(tmux show-option -v -t "$name" @yaamux-repo 2>/dev/null || echo '?')"
-      agents="$(tmux list-panes -t "${name}:agents" -F '#{@yaamux-role}' 2>/dev/null \
-        | grep -cx 'agent' 2>/dev/null || true)"
-      [[ -z "$agents" || "$agents" == "0" ]] && agents="$(tmux list-panes -t "${name}:agents" 2>/dev/null | wc -l | tr -d ' ')"
-      att_str="no"; [[ "$attached" -gt 0 ]] && att_str="yes"
-      printf "%-30s %-8s %-10s %s\n" "$name" "${agents:-0}" "$att_str" "${repo:-?}"
+      _ls_classify_panes "$name"
+      sec="$activity"; [[ "${#sec}" -ge 13 ]] && sec=$((sec/1000))
+      age=$((now - sec))
+      health="$(_ls_fmt_health "$_ls_running" "$_ls_idle" "$_ls_dead")"
+      att_str=""; [[ "$attached" -gt 0 ]] && att_str=" (attached)"
+      if [[ "$repo" == "$REPO_ROOT" ]]; then marker="*"; else marker=" "; fi
+      printf " %s %-3s %-30s %-7s %s %-5s %s%s\n" \
+        "$marker" "$i" "$name" "$_ls_agents" \
+        "$(_ls_pad_ansi "$health" 12)" "$(_ls_fmt_age "$age")" \
+        "${repo:-?}" "$att_str"
+      i=$((i+1))
     done <<< "$sessions"
   fi
+  unset -f _ls_classify_panes _ls_fmt_age _ls_fmt_health _ls_pad_ansi
+}
+
+# Normalize a session selector to a full tmux session name.
+#   empty     → current cwd's session ($SESSION)
+#   yaamux-*  → passed through
+#   <name>    → prefixed with yaamux-
+#   N (numeric) → rejected with a hint pointing at the name form
+# N is reserved for pane indices throughout yaamux; sessions are addressed by
+# name so commands stay unambiguous regardless of `--list` row order.
+_resolve_session_name() {
+  local sel="${1:-}"
+  if [[ -z "$sel" ]]; then
+    echo "$SESSION"; return 0
+  fi
+  if [[ "$sel" =~ ^[0-9]+$ ]]; then
+    die "Numeric session selectors aren't supported — use the name (see: yaamux --list).
+   e.g. yaamux --kill yaamux-myrepo   (bare 'myrepo' also works)"
+  fi
+  case "$sel" in
+    yaamux-*) echo "$sel" ;;
+    *)        echo "yaamux-${sel}" ;;
+  esac
+}
+
+# Warn (stderr) when the targeted session belongs to a different repo than the
+# current cwd. Reads the session's @yaamux-repo user-option and compares with
+# $REPO_ROOT. Silent for the current session, missing metadata (pre-v0.2), and
+# non-running sessions.
+_warn_if_cross_repo() {
+  local sess="$1" their_repo
+  [[ "$sess" == "$SESSION" ]] && return 0
+  their_repo="$(tmux show-option -v -t "$sess" @yaamux-repo 2>/dev/null || echo '')"
+  [[ -z "$their_repo" || "$their_repo" == "$REPO_ROOT" ]] && return 0
+  warn "${sess} belongs to a different repo:"
+  warn "  target:  ${their_repo}"
+  warn "  current: ${REPO_ROOT}"
 }
 
 _install_yaamux() {
@@ -2617,14 +2735,14 @@ In-session keys (press Ctrl+Space, then the key):
 
 yaamux CLI (from any shell inside the repo):
 
-  yaamux --attach                   re-attach to this session
+  yaamux --attach [<name>]          re-attach (no arg = this repo; <name> = another session from --list)
   yaamux --auto-attach              attach with UI auto-picked by terminal width
   yaamux --mobile-attach [repo]     attach with one pane zoomed (iPhone)
   yaamux --mobile-grid              multi-repo umbrella, mouse on (iPad)
   yaamux --connect [--qr]           print connect commands (+ optional QR)
   yaamux --prepare-host [--check]   one-time: symlink mosh-server so iOS mosh:// works
-  yaamux --list [--json]            list all yaamux sessions
-  yaamux --status                   per-pane health snapshot
+  yaamux --list [--json]            list all yaamux sessions (health + last-activity, * = this repo)
+  yaamux --status [<name>]          per-pane health snapshot (no arg = this repo; <name> = another session)
   yaamux --send N "text"            send text to agent N (1-based)
   yaamux --send-stdin N             send STDIN to agent N (literal — safe for any bytes)
   yaamux --broadcast "text"         send to every agent (skips control-panel)
@@ -2653,7 +2771,7 @@ yaamux CLI (from any shell inside the repo):
                                     read panel output from byte offset N
   yaamux --bg-list [--json]         list background panels with status
   yaamux --bg-kill <name>           stop a running background panel
-  yaamux --kill                     kill this session
+  yaamux --kill [<name>]            kill a session (no arg = this repo; <name> = another from --list)
   yaamux --clean [--force]          remove worktrees + bg panels (--force = dirty too)
   yaamux --remote <host>            pick + attach to a remote session
   yaamux --remote-hosts             list saved host aliases
@@ -2676,8 +2794,8 @@ _brief_data() {
   # Groups intentionally hidden from the brief: setup (operator-time), internal (UI / connect)
   # If you add a new flag to the main case block, add it here too — bats catches drift.
   cat <<'BRIEF_DATA'
-read	--list	list yaamux sessions on this machine (`--list --json` is a stable schema)
-read	--status	per-pane health snapshot of this session
+read	--list	list yaamux sessions on this machine — shows per-pane health (R/I/D), last activity, and a `*` marker on the current repo (`--list --json` is a stable, additive schema)
+read	--status	per-pane health snapshot — defaults to this session; `--status <name>` (or bare repo name) targets another session from `--list`
 read	--keys	full CLI cheat sheet
 read	--version	yaamux version
 read	--refresh-states	recompute pane state badges
@@ -2700,7 +2818,7 @@ ship	--watch-pr	block until CI passes / fails for agent N's PR: `--watch-pr N`
 ship	--auto-merge	enable auto-merge on agent N's existing PR: `--auto-merge N`
 ship	--logs	tail combined agent logs: `--logs [N]`
 ship	--vscode	open agent N's worktree in VS Code: `--vscode N` (alias: `--code`)
-refused	--kill	tears down the session (refused while YAAMUX_AGENT_MODE=safe)
+refused	--kill	tears down a session — `--kill` (this session) or `--kill <name>` (refused while YAAMUX_AGENT_MODE=safe)
 refused	--clean	removes worktrees, incl. yours (refused while YAAMUX_AGENT_MODE=safe)
 refused	--install	host-level CLI install (refused while YAAMUX_AGENT_MODE=safe)
 refused	--uninstall	host-level CLI uninstall (refused while YAAMUX_AGENT_MODE=safe)
@@ -2725,7 +2843,7 @@ internal	--pilot-supported	list pilot backends installed locally
 internal	--status-render	tmux status-right renderer
 internal	--goto	tmux-binding: jump to pane N
 internal	--sync	tmux-binding: toggle synchronize-panes
-internal	--attach	tmux attach (used by --connect output)
+internal	--attach	tmux attach — defaults to this session; `--attach <name>` targets another from `--list` (used by --connect output)
 internal	--auto-attach	device-aware attach (mosh:// entry point)
 internal	--mobile-attach	iOS-friendly attach with one pane zoomed
 internal	--mobile-grid	iPad-friendly multi-repo grid
@@ -3397,7 +3515,12 @@ case "${1:-}" in
 
   --remote-hosts)   _remote_hosts_show;    exit 0 ;;
 
-  --attach) tmux attach -t "$SESSION" 2>/dev/null || die "No session for ${PROJECT_NAME}."; exit 0 ;;
+  --attach)
+    # No arg → this repo's session. Arg → that named session (yaamux- prefix optional).
+    sess="$(_resolve_session_name "${2:-}")"
+    _warn_if_cross_repo "$sess"
+    tmux attach -t "$sess" 2>/dev/null || die "No session: ${sess}."
+    exit 0 ;;
 
   --connect)
     # Print the exact commands anyone can use to reach this host's yaamux
@@ -3608,8 +3731,11 @@ case "${1:-}" in
     exec tmux attach -t "$_mg_umbrella" ;;
 
   --kill)
-    _pilot_gate "kill session ${SESSION}" || exit 0
-    tmux kill-session -t "$SESSION" 2>/dev/null && log "Killed ${SESSION}." || warn "Not running."
+    # No arg → this repo's session. Arg → that named session (yaamux- prefix optional).
+    sess="$(_resolve_session_name "${2:-}")"
+    _warn_if_cross_repo "$sess"
+    _pilot_gate "kill session ${sess}" || exit 0
+    tmux kill-session -t "$sess" 2>/dev/null && log "Killed ${sess}." || warn "Not running: ${sess}."
     exit 0 ;;
 
   --clean)
@@ -3643,27 +3769,42 @@ case "${1:-}" in
     exit 0 ;;
 
   --status)
-    header "session: ${SESSION}"
-    tmux list-windows -t "$SESSION" 2>/dev/null || echo "  Not running"
+    # No arg → this repo's session. Arg → that named session (yaamux- prefix optional).
+    # Other-session view skips the local worktrees / notifications sections since
+    # those are scoped to the cwd's repo, not the targeted session.
+    sess="$(_resolve_session_name "${2:-}")"
+    if [[ "$sess" != "$SESSION" ]]; then
+      other_session=true; _warn_if_cross_repo "$sess"
+    else
+      other_session=false
+    fi
+    header "session: ${sess}"
+    tmux list-windows -t "$sess" 2>/dev/null || echo "  Not running"
     header "panes"
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
-      _refresh_pane_states
-      SHELLS="$(tmux show-option -v -t "$SESSION" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
-      CNT=$(tmux display-message -p -t "${SESSION}:agents" '#{window_panes}' 2>/dev/null || echo 0)
+    if tmux has-session -t "$sess" 2>/dev/null; then
+      $other_session || _refresh_pane_states
+      SHELLS="$(tmux show-option -v -t "$sess" @yaamux-shells 2>/dev/null || echo 'zsh bash sh fish dash ash')"
+      CNT=$(tmux display-message -p -t "${sess}:agents" '#{window_panes}' 2>/dev/null || echo 0)
+      # _pane_state reads the global SESSION — swap it for the duration so the
+      # right session is targeted when --status is run with an N selector.
+      _prev_session="$SESSION"; SESSION="$sess"
       for ((i=0; i<CNT; i++)); do
         STATE=$(_pane_state "$i" "$SHELLS")
-        TITLE=$(tmux display-message -p -t "${SESSION}:agents.${i}" '#{pane_title}' 2>/dev/null)
+        TITLE=$(tmux display-message -p -t "${sess}:agents.${i}" '#{pane_title}' 2>/dev/null)
         if [[ "$STATE" == "panel" ]]; then
           printf "  pane #%d: %s  (control-panel)\n" "$i" "$TITLE"
         else
           printf "  pane #%d: %s  state=%s\n" "$i" "$TITLE" "$STATE"
         fi
       done
+      SESSION="$_prev_session"
     else echo "  —"; fi
-    header "worktrees"; git worktree list 2>/dev/null
-    header "notifications"
-    [[ -n "$NTFY_TOPIC" ]] && echo "  ntfy: ${NTFY_SERVER}/${NTFY_TOPIC} (Claude panes)" \
-      || echo "  not configured — run: yaamux --setup-notify"
+    if ! $other_session; then
+      header "worktrees"; git worktree list 2>/dev/null
+      header "notifications"
+      [[ -n "$NTFY_TOPIC" ]] && echo "  ntfy: ${NTFY_SERVER}/${NTFY_TOPIC} (Claude panes)" \
+        || echo "  not configured — run: yaamux --setup-notify"
+    fi
     exit 0 ;;
 
   --zoom)
@@ -3868,6 +4009,10 @@ CONTROL_PANEL_MODE="${CONTROL_PANEL_MODE:-auto}"
 # shellcheck disable=SC1090,SC1091
 [[ -f "$PANEL_CONF_LOCAL"  ]] && source "$PANEL_CONF_LOCAL"  2>/dev/null || true
 
+# Capture whether the user explicitly typed `yaamux N ...` before defaulting —
+# the early existing-session check uses this to flag a count mismatch (e.g. the
+# user runs `yaamux 6` against an already-running 4-pane session).
+N_REQUESTED="$N"
 if [[ -z "$N" && ${#PATTERN[@]} -eq 0 ]]; then
   N="${YAAMUX_DEFAULT_COUNT:-$DEFAULT_COUNT}"
 elif [[ -z "$N" ]]; then
@@ -3896,6 +4041,43 @@ command -v tmux &>/dev/null || die "tmux not found — brew install tmux"
 command -v git  &>/dev/null || die "git not found"
 
 log "Project:   ${PROJECT_NAME}   (session: ${SESSION})"
+
+# ── Existing session short-circuit ─────────────────────────────────────────────
+# Detect a running session BEFORE the agent line-up / CLI preflight / worktree
+# setup — those are all new-session concerns and only confuse the user when we
+# end up attaching to a session that already has its own pane count, agent
+# types, and (possibly different from this run's) state.
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  EXISTING_N="$(tmux list-panes -t "${SESSION}:agents" -F '#{@yaamux-role}' 2>/dev/null \
+    | grep -cx 'agent' 2>/dev/null || true)"
+  [[ -z "$EXISTING_N" || "$EXISTING_N" == "0" ]] && \
+    EXISTING_N="$(tmux list-panes -t "${SESSION}:agents" 2>/dev/null | wc -l | tr -d ' ')"
+  warn "Session ${SESSION} is already running with ${EXISTING_N} agent(s)."
+  if [[ -n "$N_REQUESTED" && "$N_REQUESTED" != "$EXISTING_N" ]]; then
+    warn "You asked for ${N_REQUESTED} agents — this session has ${EXISTING_N}."
+    warn "  Change agent count:   ${BOLD}yaamux --kill && yaamux ${N_REQUESTED}${NC}"
+    warn "  Restart one agent:    ${BOLD}yaamux --restart <N> [<type>]${NC}"
+  fi
+  log "Attaching..."
+  # Re-apply bindings + options + on-disk assets. Crucial after a `brew
+  # upgrade` (or any yaamux update): the previously-baked `${SELF}` in
+  # `run-shell` bindings points at the old binary which may no longer
+  # exist — refreshing them ensures prefix-? / prefix-p / prefix-P / etc.
+  # all hit the current yaamux.
+  _apply_session_config
+  _refresh_pane_states
+  # If state says panel should be visible but no pane carries the role
+  # (manually killed, or older yaamux build), recreate it before attach.
+  _cpanel_self_heal
+  HEAL_IDX=()
+  _triage_prompt "$SESSION" HEAL_IDX
+  case $? in
+    1) log "Quit before attach."; exit 0 ;;
+    2) for i in "${HEAL_IDX[@]}"; do _restart_pane "$i"; done; log "Healed ${#HEAL_IDX[@]} pane(s)." ;;
+  esac
+  tmux attach -t "$SESSION"; exit 0
+fi
+
 log "Agents:    ${N}"
 log "Host:      ${HOST_DISPLAY}"
 
@@ -3997,27 +4179,8 @@ done
 grep -q "# BEGIN yaamux" "${HOME}/.ssh/config" 2>/dev/null || _gen_ssh_config
 
 # ── tmux session ───────────────────────────────────────────────────────────────
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  warn "Session ${SESSION} already running — attaching."
-  # Re-apply bindings + options + on-disk assets. Crucial after a `brew
-  # upgrade` (or any yaamux update): the previously-baked `${SELF}` in
-  # `run-shell` bindings points at the old binary which may no longer
-  # exist — refreshing them ensures prefix-? / prefix-p / prefix-P / etc.
-  # all hit the current yaamux.
-  _apply_session_config
-  _refresh_pane_states
-  # If state says panel should be visible but no pane carries the role
-  # (manually killed, or older yaamux build), recreate it before attach.
-  _cpanel_self_heal
-  HEAL_IDX=()
-  _triage_prompt "$SESSION" HEAL_IDX
-  case $? in
-    1) log "Quit before attach."; exit 0 ;;
-    2) for i in "${HEAL_IDX[@]}"; do _restart_pane "$i"; done; log "Healed ${#HEAL_IDX[@]} pane(s)." ;;
-  esac
-  tmux attach -t "$SESSION"; exit 0
-fi
-
+# Existing-session attach is handled earlier (see "Existing session short-circuit"
+# above the preflight block) — if we reach here the session is brand new.
 tmux new-session -d -s "$SESSION" -n "agents" -c "${WORKTREES_BASE}/agent-1"
 
 # Normalize pane-base-index to 0 on yaamux's own windows so the `.0`/`.1`-style
