@@ -155,10 +155,17 @@ yaamux --ci-status  "$YAAMUX_AGENT_NUMBER"   # just one pane's CI status
 yaamux --diff       "$YAAMUX_AGENT_NUMBER"   # diff your branch vs origin/main (delta-highlighted)
 ```
 
-`--watch-pr` is the right call when you've kicked off a PR and want to
-block until checks complete before doing follow-up work. Don't poll
-`--ci-status` in a loop — `--watch-pr` already wraps `gh pr checks --watch`
-properly.
+**Forge support.** `--watch-pr` and `--ci-status` are GitHub-only today
+(they wrap `gh pr checks` / `gh pr checks --watch`). On GitLab and Gitea
+they `die` with a "not implemented for $(forge_provider)" message —
+Phase 2 follow-up (tracked in [#25](https://github.com/vihang/yaamux/issues/25)).
+`--pr` (create) works on GitHub, GitLab, and Gitea today; `--auto-merge`
+works on GitHub and GitLab; `--diff` is host-agnostic (it just shells out
+to `git diff`).
+
+On GitHub, prefer `--watch-pr` over polling `--ci-status` in a loop — it
+wraps `gh pr checks --watch` and blocks cheaply on GitHub's API rather
+than re-walking the check list.
 
 ## Do not run these
 
